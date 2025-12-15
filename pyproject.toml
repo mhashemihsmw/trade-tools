@@ -13,33 +13,11 @@ keywords = []
 authors = [
   { name = "Meraj Hashemi", email = "meraj.hashemi.esh@gmail.com" },
 ]
-classifiers = [
-  "Development Status :: 4 - Beta",
-  "Programming Language :: Python",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: Implementation :: CPython",
-  "Programming Language :: Python :: Implementation :: PyPy",
-]
-dependencies = []
 
-[project.urls]
-Documentation = "https://github.com/Meraj Hashemi/trade-tools#readme"
-Issues = "https://github.com/Meraj Hashemi/trade-tools/issues"
-Source = "https://github.com/Meraj Hashemi/trade-tools"
+dependencies = []
 
 [tool.hatch.version]
 path = "src/trade_tools/__about__.py"
-
-[tool.hatch.envs.types]
-extra-dependencies = [
-  "mypy>=1.0.0",
-]
-[tool.hatch.envs.types.scripts]
-check = "mypy --install-types --non-interactive {args:src/trade_tools tests}"
 
 [tool.coverage.run]
 source_pkgs = ["trade_tools", "tests"]
@@ -53,9 +31,3 @@ omit = [
 trade_tools = ["src/trade_tools", "*/trade-tools/src/trade_tools"]
 tests = ["tests", "*/trade-tools/tests"]
 
-[tool.coverage.report]
-exclude_lines = [
-  "no cov",
-  "if __name__ == .__main__.:",
-  "if TYPE_CHECKING:",
-]

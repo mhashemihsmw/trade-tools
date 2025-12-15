@@ -1,0 +1,13 @@
+__pycache__/
+.env
+.vscode/
+data/
+*.ipynb_checkpoints
+.DS_Store
+*.log
+output/
+temp/
+*.bak
+*.tmp
+*.swp
+.idea/
