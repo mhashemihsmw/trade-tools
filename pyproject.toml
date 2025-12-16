@@ -16,18 +16,17 @@ authors = [
 
 dependencies = []
 
-[tool.hatch.version]
-path = "src/trade_tools/__about__.py"
+[tool.hatch.build.targets.wheel]
+packages = ["src/stocks", "src/crypto"]
+
+
 
 [tool.coverage.run]
-source_pkgs = ["trade_tools", "tests"]
+source_pkgs = ["src", "tests"]
 branch = true
 parallel = true
-omit = [
-  "src/trade_tools/__about__.py",
-]
 
 [tool.coverage.paths]
-trade_tools = ["src/trade_tools", "*/trade-tools/src/trade_tools"]
+trade_tools = ["src", "*/trade-tools/src"]
 tests = ["tests", "*/trade-tools/tests"]
 
