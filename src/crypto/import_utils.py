@@ -85,14 +85,14 @@ def import_crypto_prices_binance(symbol="HBARUSDT", interval="1h", limit=10, cur
     url = "https://api.binance.com/api/v3/klines"
 
     end_time = datetime.now()
-    start_time = end_time - timedelta(days=2*365)
-
+    start_time = end_time - timedelta(hours=limit)
     all_data = []
     limit_current = limit
-    length = limit
+    length = 1000
     if not current:
         limit_current = limit*1000
         length = 1000
+        start_time = end_time - timedelta(days=2*365)
     while start_time < end_time:
         params = {
             "symbol": symbol,
