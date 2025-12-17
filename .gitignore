@@ -1,7 +1,6 @@
 __pycache__/
 .env
 .vscode/
-data/
 *.ipynb_checkpoints
 .DS_Store
 *.log

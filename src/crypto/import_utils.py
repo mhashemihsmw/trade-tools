@@ -81,22 +81,24 @@ def import_crypto_prices_cryptocompare(symbol: str = "HBAR", interval: str = "hi
     return df
 
 
-def fetch_binance_hourly(symbol="HBARUSDT"):
+def import_crypto_prices_binance(symbol="HBARUSDT", interval="1h", limit=10, current = True) -> pd.DataFrame:
     url = "https://api.binance.com/api/v3/klines"
-    interval = "1h"
-    limit = 1000
 
-    end_time = datetime.utcnow()
+    end_time = datetime.now()
     start_time = end_time - timedelta(days=2*365)
 
     all_data = []
-
+    limit_current = limit
+    length = limit
+    if not current:
+        limit_current = limit*1000
+        length = 1000
     while start_time < end_time:
         params = {
             "symbol": symbol,
             "interval": interval,
-            "startTime": int(start_time.timestamp() * 1000),
-            "limit": limit
+            "startTime": int(start_time.timestamp() * length),
+            "limit": limit_current
         }
 
         resp = requests.get(url, params=params).json()
@@ -107,7 +109,7 @@ def fetch_binance_hourly(symbol="HBARUSDT"):
 
         # move start_time to last candle close
         last_open_time = resp[-1][0]
-        start_time = datetime.utcfromtimestamp(last_open_time / 1000) + timedelta(hours=1)
+        start_time = datetime.fromtimestamp(last_open_time / 1000) + timedelta(hours=1)
 
     df = pd.DataFrame(all_data, columns=[
         "time_stamp", "open", "high", "low", "close", "volume",
@@ -117,4 +119,4 @@ def fetch_binance_hourly(symbol="HBARUSDT"):
 
     df["time_stamp"] = pd.to_datetime(df["time_stamp"], unit="ms")
 
-    return df[["time_stamp", "open", "high", "low", "close", "volume"]]
+    return df
