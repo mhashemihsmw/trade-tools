@@ -10,3 +10,4 @@ temp/
 *.tmp
 *.swp
 .idea/
+*copy*
