@@ -92,7 +92,7 @@ def import_crypto_prices_binance(symbol="HBARUSDT", interval="1h", limit=10, cur
     if not current:
         limit_current = limit*1000
         length = 1000
-        start_time = end_time - timedelta(days=2*365)
+        start_time = end_time - timedelta(days=5*365)
     while start_time < end_time:
         params = {
             "symbol": symbol,

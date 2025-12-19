@@ -11,3 +11,4 @@ temp/
 *.swp
 .idea/
 *copy*
+.github/
