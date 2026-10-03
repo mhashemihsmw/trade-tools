@@ -35,14 +35,23 @@ STYLE_BOX: Dict[str, str] = {
     "QDVE.DE": LG, "EXV3.DE": LG, "WITS.L": LG, "QDVG.DE": LB, "EXV4.DE": LB,
     "QDVH.DE": LV, "EXV1.DE": LV, "QDVF.DE": LV, "IQQH.DE": "Mid Growth", "2B7D.DE": LB,
     "VAPX.L": LB, "EUNJ.DE": LB, "ICGA.DE": LB, "ASHR.L": LB, "36BZ.DE": LB, "KWBE.DE": LG,
+    "VWCG.DE": LB,
     # REITs
-    "VNQ": "Mid Blend", "O": LV, "PLD": LB, "AMT": LB,
+    "IQQ6.DE": LV, "VNQ": "Mid Blend", "O": LV, "PLD": LB, "AMT": LB,
 }
 
 BOND_MATRIX: Dict[str, str] = {
     "AGG": "Intermediate High-Quality",
     "BND": "Intermediate High-Quality",
     "VAGF.DE": "Intermediate High-Quality",
+    "IS00.MU": "Intermediate Low-Quality",
+    "IUST.DE": "Intermediate High-Quality",
+    "IUS5.DE": "Intermediate High-Quality",
+    "IS04.DE": "Long High-Quality",
+    "IBCD.DE": "Intermediate Medium-Quality",
+    "EUN5.DE": "Intermediate Medium-Quality",
+    "IUS7.DE": "Intermediate Low-Quality",
+    "36BD.DE": "Short High-Quality",
 }
 
 

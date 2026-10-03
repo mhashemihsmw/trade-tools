@@ -62,6 +62,28 @@ INITIAL_ASSET_UNIVERSE: List[Dict[str, str]] = [
     {"ticker": "KWBE.DE", "type": "etf"},  # KraneShares CSI China Internet
     {"ticker": "PPFB.DE", "type": "commodity"},  # iShares Physical Gold ETC
     {"ticker": "VAGF.DE", "type": "etf"},  # Vanguard Global Aggregate Bond, EUR-hedged
+    # Commodity ETCs / ETFs
+    {"ticker": "COPA.L", "type": "commodity"},  # WisdomTree Copper
+    {"ticker": "CRUD.MI", "type": "commodity"},  # WisdomTree WTI Crude Oil
+    {"ticker": "NGAS.L", "type": "commodity"},  # WisdomTree Natural Gas
+    {"ticker": "CORN.L", "type": "commodity"},  # WisdomTree Corn
+    {"ticker": "WEAT.L", "type": "commodity"},  # WisdomTree Wheat
+    {"ticker": "SOYB.MI", "type": "commodity"},  # WisdomTree Soybeans
+    {"ticker": "ETL2.DE", "type": "commodity"},  # L&G Longer Dated All Commodities
+    {"ticker": "AGAP.L", "type": "commodity"},  # WisdomTree (Broad) Agriculture
+    {"ticker": "INDU.L", "type": "commodity"},  # WisdomTree Industrial Metals
+    # Bond UCITS ETFs
+    {"ticker": "IS00.MU", "type": "etf"},  # iShares $ High Yield Corp Bond (Munich only)
+    {"ticker": "IUST.DE", "type": "etf"},  # iShares $ TIPS, accumulating
+    {"ticker": "IUS5.DE", "type": "etf"},  # iShares Global Inflation Linked Govt Bond, accumulating
+    {"ticker": "IS04.DE", "type": "etf"},  # iShares $ Treasury Bond 20+yr
+    {"ticker": "IBCD.DE", "type": "etf"},  # iShares $ Corp Bond
+    {"ticker": "EUN5.DE", "type": "etf"},  # iShares Core EUR Corp Bond
+    {"ticker": "IUS7.DE", "type": "etf"},  # iShares J.P. Morgan $ EM Bond
+    {"ticker": "36BD.DE", "type": "etf"},  # iShares $ Development Bank Bonds, accumulating
+    # Equity / property UCITS ETFs
+    {"ticker": "VWCG.DE", "type": "etf"},  # Vanguard FTSE Developed Europe, accumulating
+    {"ticker": "IQQ6.DE", "type": "reit"},  # iShares Developed Markets Property Yield
     # REITs
     {"ticker": "VNQ", "type": "reit"},
     {"ticker": "O", "type": "reit"},

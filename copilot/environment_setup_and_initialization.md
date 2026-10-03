@@ -131,7 +131,7 @@ SELECT (SELECT count(*) FROM assets) AS assets,
        (SELECT count(*) FROM hourly_prices) AS hourly_prices;
 ```
 
-Expected result after a successful full initialization: 80 assets, with
+Expected result after a successful full initialization: 99 assets, with
 metadata populated, and non-zero counts in `daily_prices` and `hourly_prices`.
 
 ---

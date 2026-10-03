@@ -35,24 +35,25 @@ The system is structured under `src/trade_tools/` into distinct modules:
 
 ```text
 src/trade_tools/
-├── config.py              # Centralized environment configuration
-├── cli.py                 # Click CLI interface
-├── db/                    # Database ORM, engine, session, and models
+├── config.py                  # Centralized environment configuration
+├── cli.py                     # Click CLI interface
+├── db/                        # Database ORM, engine, session, and models
 │   ├── base.py
 │   ├── session.py
 │   └── models/
-│       ├── asset.py       # Asset master table ORM
-│       └── price.py       # DailyPrice & HourlyPrice ORM models
-├── market_data/           # Market data ingestion domain logic
+│       ├── asset.py           # Asset master table ORM
+│       └── price.py           # DailyPrice & HourlyPrice ORM models
+├── market_data/               # Market data ingestion domain logic
 │   ├── clients/
 │   │   └── yfinance_client.py # Yahoo Finance client wrapper
-│   ├── initial_universe.py    # Seed universe definition (80 current assets)
+│   ├── classification.py      # Manual style-box / bond-matrix classifications
+│   ├── initial_universe.py    # Seed universe definition (99 current assets)
 │   ├── validation.py          # Price validation and cleaning
 │   └── ingestion.py           # Orchestrator for metadata and price updates
-├── jobs/                  # Job entry points (init_db, ingest_market_data)
-├── strategies/            # (Extension namespace for trade strategies)
-├── portfolio/             # (Extension namespace for portfolio optimization)
-└── features/              # (Extension namespace for feature engineering / ML)
+├── jobs/                      # Job entry points (init_db, ingest_market_data)
+├── strategies/                # (Extension namespace for trade strategies)
+├── portfolio/                 # (Extension namespace for portfolio optimization)
+└── features/                  # (Extension namespace for feature engineering / ML)
 ```
 
 ---
@@ -181,13 +182,13 @@ poetry run python -m trade_tools.jobs.init_db
 
 ## 7. Initial Asset Universe
 
-The database seed universe currently contains 80 assets (the original 45 plus
-35 additional European UCITS ETF/ETC listings):
+The database seed universe currently contains 99 assets (the original 45 plus
+54 additional European UCITS ETF/ETC listings):
 - **Equities**: AAPL, MSFT, NVDA, AMZN, GOOGL, META, BRK-B, JPM, JNJ, XOM, SAP.DE, ASML.AS, NESN.SW
-- **ETFs**: SPY, QQQ, VTI, VT, VXUS, EFA, EEM, IWM, AGG, BND, VWCE.DE, EUNL.DE, IUSQ.DE, SPYI.DE, SXR8.DE, VUAA.DE, SXRV.DE, EQQB.DE, IS3N.DE, VFEA.DE, EXSA.DE, EXS1.DE, IQQJ.DE, EUNK.DE, IUSN.DE, ZPRS.DE, CUSS.L, QDVE.DE, EXV3.DE, WITS.L, QDVG.DE, EXV4.DE, QDVH.DE, EXV1.DE, QDVF.DE, IQQH.DE, 2B7D.DE, VAPX.L, EUNJ.DE, ICGA.DE, ASHR.L, 36BZ.DE, KWBE.DE, VAGF.DE
-- **REITs**: VNQ, O, PLD, AMT
+- **ETFs**: SPY, QQQ, VTI, VT, VXUS, EFA, EEM, IWM, AGG, BND, VWCE.DE, EUNL.DE, IUSQ.DE, SPYI.DE, SXR8.DE, VUAA.DE, SXRV.DE, EQQB.DE, IS3N.DE, VFEA.DE, EXSA.DE, EXS1.DE, IQQJ.DE, EUNK.DE, IUSN.DE, ZPRS.DE, CUSS.L, QDVE.DE, EXV3.DE, WITS.L, QDVG.DE, EXV4.DE, QDVH.DE, EXV1.DE, QDVF.DE, IQQH.DE, 2B7D.DE, VAPX.L, EUNJ.DE, ICGA.DE, ASHR.L, 36BZ.DE, KWBE.DE, VAGF.DE, IS00.MU, IUST.DE, IUS5.DE, IS04.DE, IBCD.DE, EUN5.DE, IUS7.DE, 36BD.DE, VWCG.DE
+- **REITs**: VNQ, O, PLD, AMT, IQQ6.DE
 - **Fixed Income Proxies**: ^TNX, ^FVX, ^IRX
-- **Commodities / ETCs**: GLD, SLV, DBC, PPFB.DE
+- **Commodities / ETCs**: GLD, SLV, DBC, PPFB.DE, COPA.L, CRUD.MI, NGAS.L, CORN.L, WEAT.L, SOYB.MI, ETL2.DE, AGAP.L, INDU.L
 - **Crypto**: BTC-USD, ETH-USD
 - **Indices**: ^GSPC, ^IXIC, ^STOXX50E, ^GDAXI, ^FTSE, ^N225
 - **FX**: EURUSD=X, GBPUSD=X, JPY=X, CHF=X
@@ -196,6 +197,10 @@ The requested iShares MSCI AC Asia ex Japan and Xtrackers MSCI AC Asia ex Japan
 products are not seeded yet: the exact Yahoo result for the former is
 non-UCITS, while the supported Xetra listing for the latter is ESG-screened.
 They are withheld pending confirmation of the intended ISIN/share class.
+Also withheld (no clean UCITS match on Yahoo): iShares Physical Aluminium ETC,
+Vanguard S&P 500 Value/Growth UCITS, iShares MSCI EAFE UCITS, Invesco Euro
+Convertible Bond, iShares Euro High Yield, iShares MSCI USA Small Cap ESG
+Enhanced, L&G Russell 2000 US Small Cap, BNP Paribas Easy EPRA Developed Europe.
 
 ---
 
