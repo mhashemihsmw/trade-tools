@@ -86,6 +86,51 @@ Initial assets:
 | JPY=X | fx |
 | CHF=X | fx |
 
+The seed universe has since been extended with 35 additional UCITS ETF/ETC listings:
+
+| ticker | type |
+|---|---|
+| VWCE.DE | etf |
+| EUNL.DE | etf |
+| IUSQ.DE | etf |
+| SPYI.DE | etf |
+| SXR8.DE | etf |
+| VUAA.DE | etf |
+| SXRV.DE | etf |
+| EQQB.DE | etf |
+| IS3N.DE | etf |
+| VFEA.DE | etf |
+| EXSA.DE | etf |
+| EXS1.DE | etf |
+| IQQJ.DE | etf |
+| EUNK.DE | etf |
+| IUSN.DE | etf |
+| ZPRS.DE | etf |
+| CUSS.L | etf |
+| QDVE.DE | etf |
+| EXV3.DE | etf |
+| WITS.L | etf |
+| QDVG.DE | etf |
+| EXV4.DE | etf |
+| QDVH.DE | etf |
+| EXV1.DE | etf |
+| QDVF.DE | etf |
+| IQQH.DE | etf |
+| 2B7D.DE | etf |
+| VAPX.L | etf |
+| EUNJ.DE | etf |
+| ICGA.DE | etf |
+| ASHR.L | etf |
+| 36BZ.DE | etf |
+| KWBE.DE | etf |
+| PPFB.DE | commodity |
+| VAGF.DE | etf |
+
+Two additional requested Asia ex-Japan products were withheld pending exact
+instrument identification: the closest iShares Yahoo result is non-UCITS, and
+the Xtrackers Xetra result is ESG-screened. Do not substitute these without
+confirmation because they track different indexes or apply additional screens.
+
 Controlled asset types:
 
 - equity
@@ -113,7 +158,8 @@ Store at least:
 - `exchange`
 - `country`
 - `sector`
-- `industry`
+- `style_box_category` (manual; `N/A` for non-equity)
+- `bond_matrix_category` (manual; `N/A` for non-bond)
 - `data_source`
 - `active`
 - `created_at`
@@ -213,7 +259,6 @@ Retrieve available metadata such as:
 - exchange
 - country
 - sector
-- industry
 - market capitalization and other basic metadata when reliably available
 
 Handle:

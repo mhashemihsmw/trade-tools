@@ -12,7 +12,6 @@ def test_get_asset_metadata_success(mocker):
         "exchange": "NASDAQ",
         "country": "United States",
         "sector": "Technology",
-        "industry": "Consumer Electronics",
     }
     mocker.patch("yfinance.Ticker", return_value=mock_yf_ticker)
 

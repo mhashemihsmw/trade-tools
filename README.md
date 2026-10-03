@@ -46,7 +46,7 @@ src/trade_tools/
 ├── market_data/           # Market data ingestion domain logic
 │   ├── clients/
 │   │   └── yfinance_client.py # Yahoo Finance client wrapper
-│   ├── initial_universe.py    # Seed universe definition (45 default assets)
+│   ├── initial_universe.py    # Seed universe definition (80 current assets)
 │   ├── validation.py          # Price validation and cleaning
 │   └── ingestion.py           # Orchestrator for metadata and price updates
 ├── jobs/                  # Job entry points (init_db, ingest_market_data)
@@ -70,7 +70,8 @@ src/trade_tools/
 | `exchange` | String(64) | Nullable exchange name |
 | `country` | String(64) | Nullable country |
 | `sector` | String(128) | Nullable sector |
-| `industry` | String(128) | Nullable industry |
+| `style_box_category` | String(32) | Equity/REIT style box (e.g. `Large Blend`), else `N/A` |
+| `bond_matrix_category` | String(32) | Fixed-income duration/quality (e.g. `Intermediate High-Quality`), else `N/A` |
 | `data_source` | String(64) | Default `'yahoo_finance'` |
 | `active` | Boolean | Non-null, default `True` (controls ingestion) |
 | `created_at` | DateTime(tz=True) | Non-null UTC timestamp |
@@ -180,15 +181,21 @@ poetry run python -m trade_tools.jobs.init_db
 
 ## 7. Initial Asset Universe
 
-The database comes pre-seeded with 45 representative assets:
+The database seed universe currently contains 80 assets (the original 45 plus
+35 additional European UCITS ETF/ETC listings):
 - **Equities**: AAPL, MSFT, NVDA, AMZN, GOOGL, META, BRK-B, JPM, JNJ, XOM, SAP.DE, ASML.AS, NESN.SW
-- **ETFs**: SPY, QQQ, VTI, VT, VXUS, EFA, EEM, IWM, AGG, BND
+- **ETFs**: SPY, QQQ, VTI, VT, VXUS, EFA, EEM, IWM, AGG, BND, VWCE.DE, EUNL.DE, IUSQ.DE, SPYI.DE, SXR8.DE, VUAA.DE, SXRV.DE, EQQB.DE, IS3N.DE, VFEA.DE, EXSA.DE, EXS1.DE, IQQJ.DE, EUNK.DE, IUSN.DE, ZPRS.DE, CUSS.L, QDVE.DE, EXV3.DE, WITS.L, QDVG.DE, EXV4.DE, QDVH.DE, EXV1.DE, QDVF.DE, IQQH.DE, 2B7D.DE, VAPX.L, EUNJ.DE, ICGA.DE, ASHR.L, 36BZ.DE, KWBE.DE, VAGF.DE
 - **REITs**: VNQ, O, PLD, AMT
 - **Fixed Income Proxies**: ^TNX, ^FVX, ^IRX
-- **Commodities**: GLD, SLV, DBC
+- **Commodities / ETCs**: GLD, SLV, DBC, PPFB.DE
 - **Crypto**: BTC-USD, ETH-USD
 - **Indices**: ^GSPC, ^IXIC, ^STOXX50E, ^GDAXI, ^FTSE, ^N225
 - **FX**: EURUSD=X, GBPUSD=X, JPY=X, CHF=X
+
+The requested iShares MSCI AC Asia ex Japan and Xtrackers MSCI AC Asia ex Japan
+products are not seeded yet: the exact Yahoo result for the former is
+non-UCITS, while the supported Xetra listing for the latter is ESG-screened.
+They are withheld pending confirmation of the intended ISIN/share class.
 
 ---
 
@@ -229,6 +236,9 @@ poetry run trade-tools ingest
 
 # Ingest daily data only
 poetry run trade-tools ingest --no-hourly
+
+# Backfill only selected active assets
+poetry run trade-tools backfill --ticker VWCE.DE --ticker EUNL.DE
 ```
 
 ---
@@ -277,3 +287,7 @@ asleep. GitHub Actions runs independently of your machine.
    ```bash
    poetry run pytest
    ```
+
+> Style-box and bond-matrix classifications are maintained manually in
+> `src/trade_tools/market_data/classification.py` and applied to the DB on every
+> `init-db`/`ingest` run. Unlisted tickers default to `N/A`.

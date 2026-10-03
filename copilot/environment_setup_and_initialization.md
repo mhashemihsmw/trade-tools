@@ -95,7 +95,7 @@ poetry run trade-tools init-db
 ```
 
 This creates the `assets`, `daily_prices`, and `hourly_prices` tables and
-seeds the 45 initial assets defined in
+seeds the 80 current assets defined in
 [initial_universe.py](../src/trade_tools/market_data/initial_universe.py).
 This step is idempotent — re-running it seeds 0 new assets if already present.
 
@@ -109,8 +109,8 @@ poetry run trade-tools ingest
 
 Downloads ~20 years of daily history and the maximum available hourly history
 (up to ~2 years) from Yahoo Finance for all active assets, and updates asset
-metadata (name, currency, exchange, sector, industry, country). This can take
-several minutes for the full 45-asset universe on first run (longer on a free
+metadata (name, currency, exchange, sector, country). This can take
+several minutes for the full 80-asset universe on first run (longer on a free
 cloud database tier than on local Docker, due to network latency).
 Subsequent runs are incremental (only new/updated observations are fetched).
 
@@ -131,7 +131,7 @@ SELECT (SELECT count(*) FROM assets) AS assets,
        (SELECT count(*) FROM hourly_prices) AS hourly_prices;
 ```
 
-Expected result after a successful full initialization: 45 assets, with
+Expected result after a successful full initialization: 80 assets, with
 metadata populated, and non-zero counts in `daily_prices` and `hourly_prices`.
 
 ---

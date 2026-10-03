@@ -10,6 +10,7 @@ from trade_tools.config import config
 from trade_tools.db.models import Asset, DailyPrice, HourlyPrice, VALID_ASSET_TYPES
 from trade_tools.db.session import get_session, upsert_prices, get_sessionmaker
 from trade_tools.market_data.clients.yfinance_client import YahooFinanceClient
+from trade_tools.market_data.classification import bond_matrix_for, style_box_for
 from trade_tools.market_data.initial_universe import INITIAL_ASSET_UNIVERSE
 from trade_tools.market_data.validation import DataValidation
 
@@ -56,13 +57,20 @@ class MarketDataIngestion:
                     logger.warning(f"Invalid asset type '{asset_type}' for ticker {ticker}, skipping.")
                     continue
 
+                style_box = style_box_for(ticker)
+                bond_matrix = bond_matrix_for(ticker)
                 existing = s.scalar(select(Asset).where(Asset.ticker == ticker))
-                if not existing:
+                if existing:
+                    existing.style_box_category = style_box
+                    existing.bond_matrix_category = bond_matrix
+                else:
                     new_asset = Asset(
                         ticker=ticker,
                         type=asset_type,
                         active=True,
                         data_source="yahoo_finance",
+                        style_box_category=style_box,
+                        bond_matrix_category=bond_matrix,
                     )
                     s.add(new_asset)
                     added_count += 1
@@ -204,24 +212,62 @@ class MarketDataIngestion:
             self.seed_initial_assets(session)
 
             active_assets = list(session.scalars(select(Asset).where(Asset.active == True)))
-            summary.total_active_assets = len(active_assets)
-            logger.info(f"Starting ingestion job for {len(active_assets)} active assets.")
+            return self._ingest_assets(session, active_assets, include_daily, include_hourly)
 
-            for asset in active_assets:
-                res = self.ingest_asset(
-                    session=session,
-                    asset=asset,
-                    include_daily=include_daily,
-                    include_hourly=include_hourly,
+    def ingest_tickers(
+        self,
+        tickers: List[str],
+        include_daily: bool = True,
+        include_hourly: bool = True,
+    ) -> JobSummary:
+        """Ingest only the specified active asset tickers."""
+        requested_tickers = list(dict.fromkeys(ticker.strip().upper() for ticker in tickers))
+        if not requested_tickers:
+            raise ValueError("At least one ticker must be provided.")
+
+        summary = JobSummary()
+        with self.session_factory.begin() as session:
+            assets = list(
+                session.scalars(
+                    select(Asset).where(
+                        Asset.ticker.in_(requested_tickers),
+                        Asset.active.is_(True),
+                    )
                 )
-                summary.results.append(res)
+            )
+            found_tickers = {asset.ticker for asset in assets}
+            missing_tickers = sorted(set(requested_tickers) - found_tickers)
+            if missing_tickers:
+                raise ValueError(
+                    "Unknown or inactive tickers: " + ", ".join(missing_tickers)
+                )
+            return self._ingest_assets(session, assets, include_daily, include_hourly)
 
-                if res.status == "success":
-                    summary.successful_assets += 1
-                    summary.total_daily_records += res.daily_records
-                    summary.total_hourly_records += res.hourly_records
-                else:
-                    summary.failed_assets += 1
+    def _ingest_assets(
+        self,
+        session: Session,
+        assets: List[Asset],
+        include_daily: bool,
+        include_hourly: bool,
+    ) -> JobSummary:
+        summary = JobSummary(total_active_assets=len(assets))
+        logger.info(f"Starting ingestion job for {len(assets)} selected active assets.")
+
+        for asset in assets:
+            result = self.ingest_asset(
+                session=session,
+                asset=asset,
+                include_daily=include_daily,
+                include_hourly=include_hourly,
+            )
+            summary.results.append(result)
+
+            if result.status == "success":
+                summary.successful_assets += 1
+                summary.total_daily_records += result.daily_records
+                summary.total_hourly_records += result.hourly_records
+            else:
+                summary.failed_assets += 1
 
         summary.end_time = datetime.now(timezone.utc)
         logger.info(

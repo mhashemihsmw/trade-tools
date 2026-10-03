@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from datetime import datetime, timezone
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from trade_tools.db.models import Asset, DailyPrice, HourlyPrice
 from trade_tools.market_data.ingestion import MarketDataIngestion
@@ -30,7 +31,6 @@ def test_ingest_asset_with_mocked_client(db_session, mock_yfinance_client):
         "exchange": "NASDAQ",
         "country": "United States",
         "sector": "Technology",
-        "industry": "Consumer Electronics",
     }
 
     mock_daily_df = pd.DataFrame(
@@ -98,3 +98,43 @@ def test_ingest_asset_failure_resilience(db_session, mock_yfinance_client):
 
     assert res.status == "failed"
     assert "API error" in res.error or "Network timeout" in res.error
+
+
+def test_ingest_tickers_processes_only_selected_active_assets(db_session, mock_yfinance_client):
+    selected = Asset(ticker="VWCE.DE", type="etf", active=True)
+    other = Asset(ticker="AAPL", type="equity", active=True)
+    db_session.add_all([selected, other])
+    db_session.commit()
+    mock_yfinance_client.get_asset_metadata.return_value = {}
+    mock_yfinance_client.get_prices.return_value = pd.DataFrame()
+
+    ingestion = MarketDataIngestion(
+        session_factory=sessionmaker(bind=db_session.get_bind(), expire_on_commit=False),
+        client=mock_yfinance_client,
+    )
+    summary = ingestion.ingest_tickers(["vwce.de"])
+
+    assert summary.total_active_assets == 1
+    assert summary.successful_assets == 1
+    assert summary.total_daily_records == 0
+    assert summary.total_hourly_records == 0
+    assert mock_yfinance_client.get_asset_metadata.call_args.args == ("VWCE.DE",)
+    assert [call.kwargs["ticker"] for call in mock_yfinance_client.get_prices.call_args_list] == [
+        "VWCE.DE",
+        "VWCE.DE",
+    ]
+
+
+def test_ingest_tickers_rejects_unknown_or_inactive_assets(db_session, mock_yfinance_client):
+    inactive = Asset(ticker="VWCE.DE", type="etf", active=False)
+    db_session.add(inactive)
+    db_session.commit()
+    ingestion = MarketDataIngestion(
+        session_factory=sessionmaker(bind=db_session.get_bind(), expire_on_commit=False),
+        client=mock_yfinance_client,
+    )
+
+    with pytest.raises(ValueError, match="Unknown or inactive tickers: VUAA.DE, VWCE.DE"):
+        ingestion.ingest_tickers(["VWCE.DE", "VUAA.DE"])
+
+    mock_yfinance_client.get_asset_metadata.assert_not_called()

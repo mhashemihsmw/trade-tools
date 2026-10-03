@@ -13,7 +13,7 @@ class YahooFinanceClient:
     def get_asset_metadata(self, ticker: str) -> Dict[str, Any]:
         """Retrieve asset metadata for a given ticker.
         
-        Returns a dict containing name, currency, exchange, country, sector, industry, etc.
+        Returns a dict containing name, currency, exchange, country, sector, etc.
         Missing attributes will be set to None.
         """
         metadata: Dict[str, Any] = {
@@ -22,7 +22,6 @@ class YahooFinanceClient:
             "exchange": None,
             "country": None,
             "sector": None,
-            "industry": None,
         }
 
         try:
@@ -38,7 +37,6 @@ class YahooFinanceClient:
             metadata["exchange"] = info.get("exchange") or info.get("fullExchangeName")
             metadata["country"] = info.get("country")
             metadata["sector"] = info.get("sector")
-            metadata["industry"] = info.get("industry")
 
         except Exception as e:
             logger.error(f"Error fetching metadata for ticker {ticker}: {e}")

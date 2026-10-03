@@ -32,7 +32,12 @@ class Asset(Base):
     exchange: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     country: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     sector: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    industry: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    style_box_category: Mapped[str] = mapped_column(
+        String(32), default="N/A", server_default="N/A", nullable=False
+    )
+    bond_matrix_category: Mapped[str] = mapped_column(
+        String(32), default="N/A", server_default="N/A", nullable=False
+    )
     data_source: Mapped[Optional[str]] = mapped_column(String(64), default="yahoo_finance", nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

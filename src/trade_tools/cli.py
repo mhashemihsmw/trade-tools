@@ -41,6 +41,31 @@ def ingest_cmd(daily: bool, hourly: bool):
     )
 
 
+@main.command("backfill")
+@click.option("--ticker", "tickers", multiple=True, required=True, help="Ticker to backfill; repeat for multiple.")
+@click.option("--daily/--no-daily", default=True, help="Include daily price ingestion.")
+@click.option("--hourly/--no-hourly", default=True, help="Include hourly price ingestion.")
+def backfill_cmd(tickers: tuple[str, ...], daily: bool, hourly: bool):
+    """Backfill prices for selected active assets without processing other assets."""
+    init_db()
+    ingestion = MarketDataIngestion()
+    try:
+        summary = ingestion.ingest_tickers(
+            list(tickers),
+            include_daily=daily,
+            include_hourly=hourly,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Backfill completed: {summary.successful_assets}/{summary.total_active_assets} assets succeeded. "
+        f"Daily records: {summary.total_daily_records}, Hourly records: {summary.total_hourly_records}."
+    )
+    if summary.failed_assets:
+        raise click.ClickException(f"{summary.failed_assets} asset(s) failed; see logs for details.")
+
+
 @main.group("asset")
 def asset_grp():
     """Manage assets in the database."""
