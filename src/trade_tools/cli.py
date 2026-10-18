@@ -15,6 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Register the command-line interface.
 @click.group()
 def main():
     """Trade Tools CLI - Market Data, Strategy & Portfolio Management."""

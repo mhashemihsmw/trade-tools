@@ -140,10 +140,11 @@ cd trade-tools
 
 # Install dependencies and package with Poetry
 poetry install
-
-# Copy the example environment file and adjust if needed
-cp .env.example .env
 ```
+
+Create a `.env` file in the project root and set `DATABASE_URL` to your
+PostgreSQL connection string. The file is ignored by Git, so credentials stay
+local.
 
 ### Database Hosting
 
