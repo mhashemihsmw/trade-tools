@@ -42,6 +42,62 @@
     "max_exposure_group_weight": 0.3,
     "volatility_target": 0.1,
     "volatility_targeting": true,
-    "covariance_window": 63
+    "covariance_window": 63,
+    "fractional_trading": false,
+    "var_confidence": 0.95,
+    "var_horizons": [1, 21],
+    "var_lookback": 756,
+    "max_var_1d": 0.05,
+    "max_cvar_21d": 0.2,
+    "max_stress_loss": 0.35,
+    "stress_scenarios": {
+      "equity_bond_gold_scenario": {
+        "exposure_groups": {
+          "sp500": -0.3,
+          "sp500_index": -0.3,
+          "global_equity_all_world": -0.3,
+          "developed_world": -0.3,
+          "nasdaq100": -0.35,
+          "europe_equity": -0.3,
+          "europe_equity_600": -0.3,
+          "germany_equity": -0.3,
+          "developed_ex_us": -0.3,
+          "emerging_markets": -0.3,
+          "china_equity": -0.3,
+          "asia_pacific_ex_japan": -0.3,
+          "japan_equity": -0.3,
+          "us_small_cap": -0.3,
+          "world_small_cap": -0.3,
+          "us_total_market": -0.3,
+          "us_information_technology": -0.3,
+          "global_information_technology": -0.3,
+          "global_clean_energy": -0.3,
+          "us_healthcare": -0.3,
+          "us_financials": -0.3,
+          "us_energy": -0.3,
+          "us_consumer_staples": -0.3,
+          "europe_banks": -0.3,
+          "europe_healthcare": -0.3,
+          "europe_information_technology": -0.3,
+          "global_property": -0.3,
+          "us_property_reit": -0.3,
+          "gold": 0.1,
+          "us_aggregate_bonds": -0.1,
+          "us_corporate_bonds": -0.1,
+          "euro_corporate_bonds": -0.1,
+          "global_aggregate_bonds_eur_hedged": -0.1,
+          "global_inflation_linked_bonds": -0.1,
+          "development_bank_bonds": -0.1,
+          "us_high_yield_bonds": -0.1,
+          "em_bonds_usd": -0.1,
+          "long_us_treasuries": -0.1,
+          "us_tips": -0.1
+        },
+        "types": {
+          "equity": -0.3
+        },
+        "default": 0.0
+      }
+    }
   }
 }

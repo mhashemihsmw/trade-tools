@@ -280,12 +280,17 @@ asleep. GitHub Actions runs independently of your machine.
 
 ---
 
-## 11. Research Core (Version 1a)
+## 11. Research and Operations (Versions 1a–1b)
 
-The research layer consumes existing daily prices and adds no database tables.
+Version 1a's signals/backtests consume existing daily prices without persistence.
+Version 1b adds transaction-derived actual holdings, immutable monthly decision
+snapshots, risk assessments, and a local static monitoring report using additive
+tables. No broker connection or order execution is included.
 See the [research-core guide](./docs/research_core.md) for architecture, the
 full proposed 99-asset classification table, price and currency conventions,
 eligibility, strategy, risk checks, bias disclosures, and limitations.
+See the [Version 1b delivery report](./docs/version_1b_delivery.md) for the
+ledger rules, operating checklist, risk conventions, and monitoring dashboard.
 
 ```bash
 # Refresh Yahoo's adjusted history through the existing ingestion pipeline
@@ -296,20 +301,37 @@ poetry run trade-tools strategy signals --date 2025-12-31 --output signals.csv
 poetry run trade-tools portfolio target --date 2025-12-31 --capital 10000
 poetry run trade-tools strategy monthly-report
 
+# Actual ledger; fees and FX are entered in the transaction's native currency
+poetry run trade-tools transaction record --type deposit --date 2026-01-02 --quantity 10000
+poetry run trade-tools transaction record --type buy --date 2026-01-05 --ticker VWCE.DE --quantity 10 --price 120 --fees 2
+poetry run trade-tools transaction list
+poetry run trade-tools transaction reverse 12
+poetry run trade-tools transaction import-csv transactions.csv
+poetry run trade-tools portfolio actual
+
+# Persist the monthly recommendation; it is not an order
+poetry run trade-tools operations monthly-decision --new-contribution 500
+poetry run trade-tools operations monthly-decision --date 2025-12-31 --regenerate
+poetry run trade-tools operations show-decision 1
+poetry run trade-tools operations monitor-refresh
+
 # Monthly simulation and ablation comparison
 poetry run trade-tools backtest run --universe-mode tradable
 poetry run trade-tools backtest run --universe-mode research --ablation-off --include-holdout
 poetry run trade-tools backtest compare <run_id> <run_id>
 ```
 
-Default research parameters are in [`config/research.json`](./config/research.json).
-`monthly_signals.yml` runs after month end and uploads signals, exclusions,
-targets, and risk results; `backtest.yml` is manual-only and uploads a run
-directory. GitHub Actions cron timing can be delayed, and scheduled workflows
+Default research and risk parameters are in
+[`config/research.json`](./config/research.json). `monthly_decision.yml` runs at
+08:00 UTC on days 1–3, after daily ingestion at 06:00 UTC, persists one
+idempotent decision and uploads its report. `monitoring_refresh.yml` runs
+weekly on Monday and uploads a static HTML dashboard; `backtest.yml` is
+manual-only. GitHub Actions cron timing can be delayed, and scheduled workflows
 in public repositories can be disabled after 60 days without repository
-activity. Both workflows read `DATABASE_URL` only from the Actions secret.
-Signals, targets, and backtests do not write to the database; a full adjusted
-history refresh is an explicit ingestion operation.
+activity. Workflows read `DATABASE_URL` only from the Actions secret. Signals
+and backtests are read-only; `operations monthly-decision` persists snapshots,
+and transaction commands persist actual ledger entries. Full adjusted-history
+refresh remains an explicit operation through the existing ingestion path.
 
 ---
 

@@ -1,13 +1,14 @@
-# Version 1a Research Core
+# Version 1a Research Core (Historical Scope)
 
 ## Status and scope
 
-Version 1a adds point-in-time price conversion, pure price features, a deterministic
+Version 1a added point-in-time price conversion, pure price features, a deterministic
 adaptive-momentum ranker, long-only target construction, independent risk checks,
 monthly simulation, CLI commands, and manual/scheduled report workflows. It does
-not add holdings persistence, orders, VaR/CVaR, stress tests, dashboards, ML,
-or additional strategies. The existing PostgreSQL/SQLAlchemy market-data tables
-and daily ingestion workflow are preserved.
+not itself add holdings persistence, orders, VaR/CVaR, stress tests, dashboards,
+ML, or additional strategies. Version 1b adds the operating components described
+in the [delivery report](./version_1b_delivery.md), while preserving the existing
+PostgreSQL/SQLAlchemy market-data tables and daily ingestion workflow.
 
 The market-data tests were run without connecting to the configured cloud
 database. The stored-price comparison against a fresh Yahoo download has not been
@@ -35,8 +36,9 @@ the daily schedule.
 - `portfolio/construction.py` turns selected assets into weights and cash.
   `portfolio/risk.py` reports limits, concentration, volatility, drawdown,
   warnings, and violations without changing weights.
-- `config/research.json` is the documented default configuration. No features,
-  runs, rankings, holdings, or decisions are persisted to the database.
+- `config/research.json` is the documented default configuration. Version 1a
+  signals/backtests remain non-persistent; Version 1b snapshots decision-time
+  feature values and risk outputs in additive tables.
 
 The strategy receives only features at its decision time. `fit(panel, labels,
 as_of)` is called each rebalance with feature rows and labels strictly before
@@ -214,8 +216,8 @@ annualized sample covariance and scales risky weights down only. Weight sums
 plus cash equal 100%; the constructor never selects assets. Risk validation
 reports violations and warnings without modifying target weights. Concentration
 breakdowns cover asset, group, type, country, and sector when available.
-Look-through constituent exposure is unavailable. VaR/CVaR/stress testing are
-not part of this phase.
+Look-through constituent exposure is unavailable. VaR/CVaR and scenario risk
+extensions are covered in the Version 1b delivery report.
 
 ## Backtest conventions and disclosures
 
@@ -243,21 +245,24 @@ poetry run trade-tools refresh-adjusted-history
 poetry run trade-tools strategy signals --date 2025-12-31 --output data/signals/signals.csv
 poetry run trade-tools portfolio target --date 2025-12-31 --capital 10000
 poetry run trade-tools strategy monthly-report
+poetry run trade-tools operations monthly-decision --new-contribution 500
+poetry run trade-tools operations monitor-refresh
 poetry run trade-tools backtest run --universe-mode tradable
 poetry run trade-tools backtest run --universe-mode research --ablation-off --include-holdout
 poetry run trade-tools backtest compare <run_id> <run_id>
 poetry run pytest
 ```
 
-`monthly_signals.yml` runs at 08:00 UTC on days 1–3, after daily ingestion at
-06:00 UTC, and supports manual date/capital inputs. It refreshes full adjusted
-history, guards reports by date/configuration using cached report state, fails
-on stale tradable data, and uploads reports as an artifact. `backtest.yml` is
-manual-only and uploads the run directory. Both workflows read
-`DATABASE_URL` only from `secrets.DATABASE_URL`. GitHub Actions cron timing can
-be delayed under load; scheduled workflows in public repositories are disabled
-after 60 days without repository activity. Run the same CLI commands locally
-when a scheduled run is delayed or disabled.
+`monthly_decision.yml` runs at 08:00 UTC on days 1–3 after daily ingestion at
+06:00 UTC. It refreshes full adjusted history, checks staleness, and creates an
+idempotent persisted decision plus report; manual inputs support date,
+contribution, and explicit regeneration. `monitoring_refresh.yml` runs weekly
+and uploads the static monitoring report; it also refreshes a tradable
+backtest snapshot. `backtest.yml` is manual-only and uploads a run directory.
+All workflows read `DATABASE_URL` only from `secrets.DATABASE_URL`. GitHub
+Actions cron timing can be delayed under load; scheduled workflows in public
+repositories are disabled after 60 days without repository activity. Run the
+same CLI commands locally when a scheduled run is delayed or disabled.
 
 Tests use in-memory SQLite fixtures, mock Yahoo Finance, and replace the
 configured database URL before importing application code. They abort if the
@@ -272,5 +277,6 @@ configured URL matches the `.env` production URL. `.env` remains ignored by Git.
   the CLI; the resulting report includes metrics and bias disclosures.
 - FX and market-close timestamp alignment are explicit approximations; broader
   currency and corporate-action verification is needed before live execution.
-- Staggered tranches are deferred. No ML model, live holdings ledger, order
-  execution, or portfolio persistence exists.
+- Staggered tranches, broker integration, automatic order execution, ML, and
+  complex web applications remain out of scope. See the Version 1b report for
+  the transaction-derived holdings and static HTML monitoring implementation.

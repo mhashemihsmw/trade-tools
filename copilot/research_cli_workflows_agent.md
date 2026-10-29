@@ -10,16 +10,17 @@ GitHub Actions orchestration, test-database safety, and directly related docs.
 - `src/trade_tools/cli.py`
 - `src/trade_tools/research_config.py`
 - `config/research.json`
-- `.github/workflows/monthly_signals.yml`
+- `.github/workflows/monthly_decision.yml`
+- `.github/workflows/monitoring_refresh.yml`
 - `.github/workflows/backtest.yml`
 - `tests/conftest.py` and CLI/workflow safety tests
 - `README.md`, `docs/research_core.md`, and this `copilot/` folder
 
 ## Invariants
 
-- Signals, portfolio targets, and backtests are read-only with respect to the
-  database. Full adjusted-history refresh is the explicit exception and uses
-  the existing ingestion path.
+- Version 1a signals, portfolio targets, and backtests are read-only.
+  Version 1b monthly decisions and actual transactions persist only through
+  their designated commands; history refresh uses the existing ingestion path.
 - Tests force isolated SQLite and abort if the configured URL matches `.env`
   production; never display connection strings.
 - Workflows contain orchestration only and invoke CLI commands. Database

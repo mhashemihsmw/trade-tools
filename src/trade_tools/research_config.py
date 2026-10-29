@@ -28,6 +28,7 @@ def load_research_config(
         backtest = dict(raw.get("backtest", {}))
         strategy = dict(raw.get("strategy", {}))
         portfolio = dict(raw.get("portfolio", {}))
+        portfolio["var_horizons"] = tuple(portfolio.get("var_horizons", (1, 21)))
         strategy["horizon_weights"] = tuple(strategy.get("horizon_weights", (12, 4, 2, 1)))
         strategy["include_tickers"] = tuple(strategy.get("include_tickers", ()))
         strategy["exclude_tickers"] = tuple(strategy.get("exclude_tickers", ()))

@@ -1,0 +1,60 @@
+name: Monthly Portfolio Decision
+
+on:
+  schedule:
+    - cron: "0 8 1-3 * *"
+  workflow_dispatch:
+    inputs:
+      decision_date:
+        description: "Optional decision date (YYYY-MM-DD)"
+        required: false
+        type: string
+      new_contribution:
+        description: "Optional new EUR contribution to include in recommended capital"
+        required: false
+        type: string
+      regenerate:
+        description: "Supersede the prior saved decision and create a new generation"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  decision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: python -m pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Create and persist monthly decision
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DECISION_DATE: ${{ inputs.decision_date }}
+          NEW_CONTRIBUTION: ${{ inputs.new_contribution }}
+          REGENERATE: ${{ inputs.regenerate }}
+        run: |
+          args=()
+          if [ -n "$DECISION_DATE" ]; then args+=(--date "$DECISION_DATE"); fi
+          if [ -n "$NEW_CONTRIBUTION" ]; then args+=(--new-contribution "$NEW_CONTRIBUTION"); fi
+          if [ "$REGENERATE" = "true" ]; then args+=(--regenerate); fi
+          poetry run trade-tools operations monthly-decision "${args[@]}"
+
+      - name: Upload decision report
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-decision-${{ github.run_id }}
+          path: reports/monthly_decisions/
+          if-no-files-found: error
+          retention-days: 90
