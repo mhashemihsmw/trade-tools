@@ -805,7 +805,11 @@ def monthly_decision(
                     selected=bool(row["selected"]),
                     target_weight=float(target_map.get(row["ticker"], 0.0)),
                     feature_values=feature_values,
-                    exclusion_reason=row.get("exclusion_reason"),
+                    exclusion_reason=(
+                        str(row["exclusion_reason"])
+                        if pd.notna(row.get("exclusion_reason"))
+                        else None
+                    ),
                 ))
             for trade in trade_plan["trades"].to_dict("records"):
                 session.add(DecisionTrade(
