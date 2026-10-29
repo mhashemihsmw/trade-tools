@@ -123,6 +123,56 @@ def reverse_transaction(session: Session, transaction_id: int, *, notes: str | N
     return reversal
 
 
+def reverse_decision_transactions(session: Session, decision_id: int) -> int:
+    """Reverse the still-effective ledger entries auto-recorded for a decision."""
+    prefix = f"decision-{decision_id}-"
+    entries = [
+        row for row in _effective_transactions(session)
+        if row.reference and row.reference.startswith(prefix)
+    ]
+    for entry in entries:
+        reverse_transaction(
+            session, entry.id, notes=f"Reversal of superseded decision {decision_id}"
+        )
+    return len(entries)
+
+
+def record_decision_transactions(
+    session: Session,
+    *,
+    decision_id: int,
+    trade_date: date,
+    trades: pd.DataFrame,
+    asset_ids: dict[str, int],
+    contribution_eur: float = 0.0,
+) -> list[Transaction]:
+    """Record a decision's contribution and trades as assumed fills in the ledger.
+
+    Entries are modelled fills at the proposal price, not broker confirmations.
+    Sells are staged before buys so sale proceeds are available as cash.
+    """
+    note = f"Auto-recorded from monthly decision {decision_id}; assumed fill, not a broker confirmation"
+    recorded: list[Transaction] = []
+    if contribution_eur > 0:
+        recorded.append(record_transaction(
+            session, transaction_type="deposit", quantity=contribution_eur,
+            trade_date=trade_date, notes=note,
+            reference=f"decision-{decision_id}-contribution",
+        ))
+    for side in ("sell", "buy"):
+        if trades.empty:
+            break
+        for row in trades.loc[trades["side"] == side].to_dict("records"):
+            recorded.append(record_transaction(
+                session, transaction_type=side, quantity=float(row["quantity"]),
+                trade_date=trade_date, asset_id=asset_ids[row["ticker"]],
+                execution_price=float(row["price_eur"]),
+                fees=float(row["estimated_cost_eur"]), notes=note,
+                reference=f"decision-{decision_id}-{side}-{row['ticker']}",
+            ))
+    return recorded
+
+
 def _effective_transactions(session: Session, as_of: date | None = None) -> list[Transaction]:
     rows = list(
         session.scalars(

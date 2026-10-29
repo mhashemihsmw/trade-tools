@@ -1,12 +1,13 @@
 from contextlib import contextmanager
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from click.testing import CliRunner
 
 from trade_tools import cli
-from trade_tools.db.models import Asset, DecisionItem, StrategyDecision, Transaction
+from trade_tools.db.models import Asset, DecisionItem, DecisionTrade, StrategyDecision, Transaction
 from trade_tools.portfolio.construction import PortfolioConfig
 from trade_tools.portfolio.operations import derive_portfolio
 from trade_tools.strategies.adaptive_momentum import StrategyConfig
@@ -108,6 +109,15 @@ def test_monthly_decision_is_idempotent_regenerates_and_replays_saved_features(
         decision_id=original_decision.id
     ).one()
     assert original_item.feature_values["score"] == 0.25
+    assert original_item.feature_values["target_value_eur"] > 0
+    ledger = db_session.query(Transaction).order_by(Transaction.id).all()
+    assert [entry.transaction_type for entry in ledger] == ["deposit", "buy"]
+    assert all(entry.reference.startswith(f"decision-{original_decision.id}-") for entry in ledger)
+    first_portfolio = derive_portfolio(db_session, {"VWCE.DE": frame}, metadata=metadata)
+    assert first_portfolio["holdings"].iloc[0]["quantity"] > 0
+    assert db_session.query(DecisionTrade).filter_by(
+        decision_id=original_decision.id
+    ).count() > 0
     assert calls["count"] == 1
 
     score["value"] = 0.99
@@ -131,6 +141,15 @@ def test_monthly_decision_is_idempotent_regenerates_and_replays_saved_features(
         decision_id=decisions[1].id
     ).one()
     assert new_item.feature_values["score"] == 0.99
+    db_session.expire_all()
+    # Regeneration reverses generation 1's entries and records generation 2's.
+    assert db_session.query(Transaction).filter(Transaction.reversal_of_id.isnot(None)).count() == 2
+    regenerated_portfolio = derive_portfolio(db_session, {"VWCE.DE": frame}, metadata=metadata)
+    assert regenerated_portfolio["holdings"].iloc[0]["quantity"] == first_portfolio["holdings"].iloc[0]["quantity"]
+    for decision in decisions:
+        report_directory = Path(decision.report_path).parent
+        (report_directory / "recommended_targets.csv").unlink(missing_ok=True)
+        (report_directory / "proposed_trades.csv").unlink(missing_ok=True)
     mocker.patch.object(cli, "load_research_prices", return_value=({}, metadata))
     monkeypatch.chdir(tmp_path)
     dashboard = runner.invoke(cli.main, [
@@ -142,6 +161,7 @@ def test_monthly_decision_is_idempotent_regenerates_and_replays_saved_features(
     assert "A. Strategy" in dashboard_html
     assert "B. Current portfolio and next allocation" in dashboard_html
     assert "C. Overall actual portfolio" in dashboard_html
+    assert "rebalance_to_recommended_target" in dashboard_html
 
 
 def test_transaction_csv_import_persists_cash_and_trade_entries(db_session, mocker, tmp_path):

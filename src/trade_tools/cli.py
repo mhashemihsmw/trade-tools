@@ -14,7 +14,8 @@ from sqlalchemy.exc import IntegrityError
 
 from trade_tools.db import init_db, get_session
 from trade_tools.db.models import (
-    Asset, DecisionItem, RiskAssessment, StrategyDecision, Transaction, VALID_ASSET_TYPES,
+    Asset, DecisionItem, DecisionTrade, RiskAssessment, StrategyDecision, Transaction,
+    VALID_ASSET_TYPES,
 )
 from trade_tools.jobs.init_db import run_init_db
 from trade_tools.market_data.ingestion import MarketDataIngestion
@@ -26,7 +27,9 @@ from trade_tools.portfolio.operations import (
     derive_portfolio,
     portfolio_nav_history,
     propose_trades,
+    record_decision_transactions,
     record_transaction,
+    reverse_decision_transactions,
     reverse_transaction,
     time_weighted_returns,
 )
@@ -626,6 +629,10 @@ def operations_group():
 @click.option("--reports-dir", default="reports/monthly_decisions", show_default=True, type=click.Path(file_okay=False))
 @click.option("--regenerate", is_flag=True, help="Supersede the prior decision and create a new generation.")
 @click.option("--refresh-history/--no-refresh-history", default=True, help="Refresh adjusted prices before computing.")
+@click.option(
+    "--auto-record/--no-auto-record", default=True,
+    help="Record the contribution and proposed trades in the ledger as assumed fills.",
+)
 def monthly_decision(
     decision_date: str | None,
     new_contribution: float,
@@ -633,8 +640,9 @@ def monthly_decision(
     reports_dir: str,
     regenerate: bool,
     refresh_history: bool,
+    auto_record: bool,
 ):
-    """Compute, risk-check, persist and report a non-executing monthly proposal."""
+    """Compute, risk-check and persist a monthly decision; fills are modelled, not broker orders."""
     init_db()
     backtest, strategy_config, portfolio_config = load_research_config(config_path)
     if strategy_config.universe_mode != backtest.universe_mode:
@@ -774,7 +782,20 @@ def monthly_decision(
             session.add(decision_row)
             session.flush()
             target_map = dict(zip(targets["ticker"], targets["weight"])) if not targets.empty else {}
+            target_values_by_ticker = (
+                targets.set_index("ticker")["target_value"].to_dict()
+                if not targets.empty and "target_value" in targets
+                else {}
+            )
+            def optional_float(value: Any) -> float | None:
+                return float(value) if pd.notna(value) and np.isfinite(value) else None
+
             for row in ranked.to_dict("records"):
+                feature_values = _json_safe(row)
+                if row["ticker"] in target_values_by_ticker:
+                    feature_values["target_value_eur"] = float(
+                        target_values_by_ticker[row["ticker"]]
+                    )
                 session.add(DecisionItem(
                     decision_id=decision_row.id,
                     asset_id=row.get("id"),
@@ -783,8 +804,19 @@ def monthly_decision(
                     rank=int(row["rank"]) if pd.notna(row.get("rank")) else None,
                     selected=bool(row["selected"]),
                     target_weight=float(target_map.get(row["ticker"], 0.0)),
-                    feature_values=_json_safe(row),
+                    feature_values=feature_values,
                     exclusion_reason=row.get("exclusion_reason"),
+                ))
+            for trade in trade_plan["trades"].to_dict("records"):
+                session.add(DecisionTrade(
+                    decision_id=decision_row.id,
+                    ticker=trade["ticker"],
+                    side=trade["side"],
+                    quantity=optional_float(trade["quantity"]),
+                    price_eur=optional_float(trade["price_eur"]),
+                    notional_eur=optional_float(trade["notional_eur"]),
+                    estimated_cost_eur=optional_float(trade["estimated_cost_eur"]),
+                    reason=trade["reason"],
                 ))
             combined_risk = {
                 "recommended": proposed_risk,
@@ -798,6 +830,23 @@ def monthly_decision(
                 violations=proposed_risk["violations"],
                 warnings=proposed_risk["warnings"],
             ))
+            recorded_count = 0
+            if auto_record and proposed_risk["status"] == "valid":
+                for old in existing:
+                    if old.status == "superseded":
+                        reverse_decision_transactions(session, old.id)
+                recorded = record_decision_transactions(
+                    session,
+                    decision_id=decision_row.id,
+                    trade_date=decision_day,
+                    trades=trade_plan["trades"],
+                    asset_ids={ticker: meta["id"] for ticker, meta in metadata.items()},
+                    contribution_eur=new_contribution,
+                )
+                session.flush()
+                # Replaying the ledger rejects oversells or cash shortfalls and rolls everything back.
+                derive_portfolio(session, prices, as_of=decision_day, metadata=metadata)
+                recorded_count = len(recorded)
             rankings_html = ranked.to_html(index=False, escape=True, na_rep="")
             holdings_html = actual["holdings"].to_html(index=False, escape=True, na_rep="")
             targets_html = targets.to_html(index=False, escape=True, na_rep="")
@@ -809,13 +858,13 @@ table{{border-collapse:collapse;font-size:13px}}th,td{{border:1px solid #ccd2d8;
 th{{background:#eef2f6}}.actual{{color:#125d3a}}.recommended{{color:#124d83}}</style></head>
 <body><h1>Monthly operating proposal — {decision_day}</h1>
 <p>Decision #{decision_row.id}, generation {generation}; data cutoff {decision.isoformat()}.
-No orders are sent. Next scheduled decision: {(decision + pd.offsets.MonthEnd(1)).date()}.</p>
+No orders are sent; {recorded_count} assumed-fill ledger entries were recorded. Next scheduled decision: {(decision + pd.offsets.MonthEnd(1)).date()}.</p>
 <p>Actual portfolio value: EUR {actual['portfolio_value_eur']:.2f};
 actual cash: EUR {actual['cash_eur']:.2f}; new contribution considered: EUR {new_contribution:.2f};
 recommended capital: EUR {capital:.2f}.</p>
 <h2 class="actual">Actual holdings</h2>{holdings_html}
 <h2 class="recommended">Recommended targets</h2>{targets_html}
-<h2 class="recommended">Proposed trades — not executed</h2>{trades_html}
+<h2 class="recommended">Proposed trades — assumed fills at proposal price{' (recorded in ledger)' if recorded_count else ' (not recorded)'}</h2>{trades_html}
 <p>Estimated costs: EUR {trade_plan['estimated_costs_eur']:.2f};
 projected cash after proposals: EUR {trade_plan['cash_after_trades_eur']:.2f}.
 Recommended risk status: {html.escape(proposed_risk['status'])}; actual risk status: {html.escape(actual_risk['status'])}.</p>
@@ -825,19 +874,20 @@ Recommended risk status: {html.escape(proposed_risk['status'])}; actual risk sta
             trade_plan["trades"].to_csv(report_dir / "proposed_trades.csv", index=False)
             decision_id = decision_row.id
             risk_status = proposed_risk["status"]
+            ledger_entries = recorded_count
     except (ValueError, IntegrityError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Persisted decision {decision_id}; report: {report_path}")
-    click.echo(f"Risk status: {risk_status}; proposed trades are not executed.")
+    click.echo(
+        f"Risk status: {risk_status}; {ledger_entries} assumed-fill ledger entries recorded "
+        "(modelled fills, not broker orders)."
+    )
     if risk_status != "valid":
         raise click.ClickException("Recommended proposal rejected by configured risk validation.")
 
 
-@operations_group.command("monitor-refresh")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--output", default="reports/monitoring/index.html", show_default=True, type=click.Path(dir_okay=False, path_type=Path))
-def monitor_refresh(config_path: str, output: Path):
-    """Generate a local static HTML dashboard from decisions, ledger, and backtests."""
+def generate_monitoring_dashboard(config_path: str, output: Path) -> Path:
+    """Render the current monitoring dashboard and return its output path."""
     init_db()
     _, _, portfolio_config = load_research_config(config_path)
     with get_session() as session:
@@ -864,6 +914,9 @@ def monitor_refresh(config_path: str, output: Path):
         latest_risk = session.scalar(select(RiskAssessment).where(
             RiskAssessment.decision_id == latest.id
         )) if latest else None
+        latest_trades = list(session.scalars(select(DecisionTrade).where(
+            DecisionTrade.decision_id == latest.id
+        ).order_by(DecisionTrade.ticker))) if latest else []
         risk_history = list(session.scalars(select(RiskAssessment).order_by(
             RiskAssessment.created_at.desc()
         ).limit(36)))
@@ -876,13 +929,27 @@ def monitor_refresh(config_path: str, output: Path):
         "recommended_target_weight": item.target_weight,
         "exclusion": item.exclusion_reason,
     } for item in latest_items])
-    target_frame = pd.DataFrame()
-    trade_frame = pd.DataFrame()
-    if latest and latest.report_path:
+    target_frame = pd.DataFrame([{
+        "ticker": item.ticker,
+        "weight": item.target_weight,
+        "target_value": item.feature_values.get("target_value_eur"),
+    } for item in latest_items if item.selected and item.target_weight > 0])
+    trade_frame = pd.DataFrame([{
+        "ticker": trade.ticker,
+        "side": trade.side,
+        "quantity": trade.quantity,
+        "price_eur": trade.price_eur,
+        "notional_eur": trade.notional_eur,
+        "estimated_cost_eur": trade.estimated_cost_eur,
+        "reason": trade.reason,
+    } for trade in latest_trades])
+    if latest and latest.report_path and (target_frame.empty or trade_frame.empty):
         report_directory = Path(latest.report_path).parent
         try:
-            target_frame = pd.read_csv(report_directory / "recommended_targets.csv")
-            trade_frame = pd.read_csv(report_directory / "proposed_trades.csv")
+            if target_frame.empty:
+                target_frame = pd.read_csv(report_directory / "recommended_targets.csv")
+            if trade_frame.empty:
+                trade_frame = pd.read_csv(report_directory / "proposed_trades.csv")
         except FileNotFoundError:
             logger.warning("Persisted report artifacts are missing for decision %s", latest.id)
 
@@ -931,7 +998,7 @@ section{{margin:2rem 0;padding-top:1rem;border-top:2px solid #d5dbe2}}.actual{{c
 .recommended{{color:#124d83}}small{{color:#52606d}}</style></head><body>
 <h1>Trade Tools — monitoring snapshot</h1>
 <p>Generated {datetime.now(timezone.utc).isoformat()}. All figures are labeled actual or recommended;
-proposed trades are not executed.</p>
+trades from monthly decisions are modelled fills, not broker orders.</p>
 <section><h2>A. Strategy</h2>
 <p>Latest persisted decision: {latest.decision_date.isoformat() if latest else 'none'};
 {html.escape(latest.strategy_name) if latest else '—'} v{html.escape(latest.strategy_version) if latest else '—'};
@@ -949,7 +1016,7 @@ universe {html.escape(latest.universe_mode) if latest else '—'}.</p>
 realized P&amp;L EUR {actual['realized_pnl_eur']:.2f}; unrealized P&amp;L EUR {actual['unrealized_pnl_eur']:.2f}.</p>
 <p>Valuation completeness: {actual['valuation_complete']}; unpriced actual holdings: {html.escape(', '.join(actual['unpriced_tickers']) or 'none')}.</p>
 <h3 class="recommended">Recommended targets from latest persisted decision</h3>{render(target_frame, 'No saved recommendation.')}
-<h3 class="recommended">Proposed trades — not executed</h3>{render(trade_frame, 'No proposed trades.')}
+<h3 class="recommended">Latest decision trades (assumed fills; recorded in ledger when auto-record was on)</h3>{render(trade_frame, 'No proposed trades.')}
 <p>Next decision date: {(latest.decision_date + pd.offsets.MonthEnd(1)).date().isoformat() if latest else 'not scheduled'}.</p>
 <p>Latest recommended risk status: {html.escape(latest_risk.status) if latest_risk else 'not assessed'}.
 Actual risk status: {html.escape(actual_risk['status'])}.</p>
@@ -966,6 +1033,15 @@ Daily TWR assumes same-day deposits and withdrawals occur at close.</p>
 <p>VaR/CVaR use overlapping 1-day and 21-day historical return windows, positive-loss sign convention,
 and empirical lower-order-statistic thresholds. These are historical estimates, not forecasts.</p>
 </section></body></html>""")
+    return output
+
+
+@operations_group.command("monitor-refresh")
+@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
+@click.option("--output", default="reports/monitoring/index.html", show_default=True, type=click.Path(dir_okay=False, path_type=Path))
+def monitor_refresh(config_path: str, output: Path):
+    """Generate a local static HTML dashboard from decisions, ledger, and backtests."""
+    generate_monitoring_dashboard(config_path, output)
     click.echo(f"Monitoring report written: {output}")
 
 

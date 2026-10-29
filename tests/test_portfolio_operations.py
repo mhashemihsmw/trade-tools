@@ -180,3 +180,31 @@ def test_proposed_buys_are_blocked_when_cash_is_insufficient():
     assert result["trades"].iloc[0]["side"] == "blocked"
     assert result["trades"].iloc[0]["reason"] == "insufficient_cash_for_proposed_buy"
     assert result["cash_after_trades_eur"] == 20
+
+
+def test_decision_transactions_sell_before_buy_and_reverse(db_session):
+    from trade_tools.portfolio.operations import (
+        record_decision_transactions,
+        reverse_decision_transactions,
+    )
+
+    old, new = Asset(ticker="OLD", type="etf", currency="EUR"), Asset(ticker="NEW", type="etf", currency="EUR")
+    db_session.add_all([old, new])
+    db_session.flush()
+    record_transaction(db_session, transaction_type="deposit", quantity=1000, trade_date=date(2024, 1, 1))
+    record_transaction(
+        db_session, transaction_type="buy", quantity=10, trade_date=date(2024, 1, 2),
+        asset_id=old.id, execution_price=100,
+    )
+    trades = pd.DataFrame([
+        {"ticker": "NEW", "side": "buy", "quantity": 10.0, "price_eur": 100.0, "estimated_cost_eur": 2.0},
+        {"ticker": "OLD", "side": "sell", "quantity": 10.0, "price_eur": 100.0, "estimated_cost_eur": 2.0},
+        {"ticker": "NEW", "side": "blocked", "quantity": 0.0, "price_eur": 100.0, "estimated_cost_eur": 0.0},
+    ])
+    entries = record_decision_transactions(
+        db_session, decision_id=7, trade_date=date(2024, 2, 1), trades=trades,
+        asset_ids={"OLD": old.id, "NEW": new.id}, contribution_eur=50,
+    )
+    assert [entry.transaction_type for entry in entries] == ["deposit", "sell", "buy"]
+    assert reverse_decision_transactions(db_session, 7) == 3
+    assert reverse_decision_transactions(db_session, 7) == 0

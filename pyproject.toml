@@ -19,6 +19,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "click>=8.1.0",
     "matplotlib (>=3.11.2,<4.0.0)",
+    "flask (>=3,<4)",
+    "gunicorn (>=23,<24)",
 ]
 
 [tool.poetry.group.dev.dependencies]

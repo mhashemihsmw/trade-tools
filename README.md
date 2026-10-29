@@ -309,7 +309,7 @@ poetry run trade-tools transaction reverse 12
 poetry run trade-tools transaction import-csv transactions.csv
 poetry run trade-tools portfolio actual
 
-# Persist the monthly recommendation; it is not an order
+# Persist the monthly decision; modelled fills are recorded in the ledger (--no-auto-record to skip)
 poetry run trade-tools operations monthly-decision --new-contribution 500
 poetry run trade-tools operations monthly-decision --date 2025-12-31 --regenerate
 poetry run trade-tools operations show-decision 1
@@ -326,12 +326,50 @@ Default research and risk parameters are in
 08:00 UTC on days 1–3, after daily ingestion at 06:00 UTC, persists one
 idempotent decision and uploads its report. `monitoring_refresh.yml` runs
 weekly on Monday and uploads a static HTML dashboard; `backtest.yml` is
-manual-only. GitHub Actions cron timing can be delayed, and scheduled workflows
+manual-only. A separately deployable, authenticated web dashboard is described
+below. GitHub Actions cron timing can be delayed, and scheduled workflows
 in public repositories can be disabled after 60 days without repository
 activity. Workflows read `DATABASE_URL` only from the Actions secret. Signals
 and backtests are read-only; `operations monthly-decision` persists snapshots,
 and transaction commands persist actual ledger entries. Full adjusted-history
 refresh remains an explicit operation through the existing ingestion path.
+
+### Continuously hosted dashboard
+
+The web dashboard runs as a long-lived Flask/Gunicorn service in the supplied
+Docker image. It refreshes its data on each page load and automatically reloads
+the page every five minutes. It is separate from the weekly GitHub Actions
+static-report workflow.
+
+Deploy the repository's `Dockerfile` to a container host that supports a
+persistent disk. Configure these environment variables in the host's secret
+manager:
+
+- `DATABASE_URL` — the PostgreSQL connection string.
+- `DASHBOARD_USERNAME` — the dashboard's HTTP Basic Auth username.
+- `DASHBOARD_PASSWORD` — a unique password of at least 16 characters.
+
+The service listens on the host-provided `PORT` (default `8080`) and exposes
+`/healthz` for health checks. Monthly targets and proposed trades come from
+database snapshots. Backtest panels read local `reports/backtests` files, so
+they remain empty until backtest reports are generated on the host. A persistent
+disk at `/app/reports` preserves those reports across restarts. Configure the
+host's TLS/HTTPS endpoint and keep the service private or behind its
+authentication. Do not expose credentials in source control or logs.
+
+For a local container smoke run, first set the three environment variables in
+your shell, then run:
+
+```bash
+docker build -t trade-tools-dashboard .
+docker run --detach --name trade-tools-dashboard --restart unless-stopped \
+  --publish 8080:8080 --env DATABASE_URL --env DASHBOARD_USERNAME \
+  --env DASHBOARD_PASSWORD --volume trade-tools-reports:/app/reports \
+  trade-tools-dashboard
+```
+
+Open `http://localhost:8080` and authenticate. On a public host, use its HTTPS
+URL; HTTP Basic Auth must not be used over an unencrypted public connection.
 
 ---
 

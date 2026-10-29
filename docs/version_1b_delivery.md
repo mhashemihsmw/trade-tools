@@ -3,7 +3,7 @@
 ## Status and go-live caveat
 
 Version 1b adds a transaction-derived actual portfolio, immutable monthly
-decision snapshots, non-executing rebalance proposals, additional risk checks,
+decision snapshots, rebalance proposals recorded as modelled ledger fills, additional risk checks,
 and static HTML monitoring. The broker boundary remains manual: nothing in this
 release sends an order.
 
@@ -17,7 +17,7 @@ relying on real-money recommendations.
 
 ## Architecture and additive schema
 
-The existing SQLAlchemy `Base.metadata.create_all` initialization creates four
+The existing SQLAlchemy `Base.metadata.create_all` initialization creates five
 new tables and does not drop, rewrite, or add columns to existing market-data
 tables:
 
@@ -29,6 +29,8 @@ tables:
   generation.
 - `decision_items` — one ticker per decision, score/rank/selection/target,
   stored feature values, and exclusion reason.
+- `decision_trades` — persisted non-executing proposed trade rows, so the live
+  dashboard does not depend on files from the monthly workflow runner.
 - `risk_assessments` — one row per decision, containing recommended and actual
   assessment outputs, configured limits, violations, and warnings.
 
@@ -91,13 +93,23 @@ cost configuration. It requires the `tradable` universe and checks stale data
 before creating a new decision.
 
 Recommended capital is actual market value plus recorded cash plus the optional
-`--new-contribution`. A contribution passed to the command is **prospective**;
-it does not change actual cash until recorded as a deposit transaction. The
-command computes whole-share quantities by default (or fractional quantities
-when configured), applies minimum order size and costs, and blocks proposed
-buys that cannot be funded by available actual cash plus the prospective
-contribution. The report always separates actual holdings from recommended
-targets/trades. No proposal is treated as an execution.
+`--new-contribution`. The command computes whole-share quantities by default
+(or fractional quantities when configured), applies minimum order size and
+costs, and blocks proposed buys that cannot be funded by available cash plus
+the contribution. The report separates actual holdings from recommended
+targets and trades.
+
+**Automatic ledger recording (default `--auto-record`).** When the proposal's
+risk status is `valid`, the command writes the contribution as a `deposit` and
+each proposed sell, then buy, as a `transaction` dated the decision date. They
+are *modelled fills* at the proposal's close price with the estimated cost as
+the fee, not broker confirmations; entries carry the reference
+`decision-<id>-<side>-<ticker>` and a note saying so. The ledger is replayed
+afterwards and the whole decision rolls back if it would oversell or overspend.
+`--regenerate` reverses the superseded generation's entries before recording
+the new ones, and a matching rerun records nothing twice. Use
+`--no-auto-record` to keep proposals only and record real fills yourself;
+correct any modelled fill with `transaction reverse` plus the actual fill.
 
 Decision identity is strategy name/version, a SHA-256 parameter hash, resolved
 decision date, and universe mode. The parameter hash includes strategy,
@@ -114,9 +126,10 @@ Example monthly run:
 # Review/record actual cash and transactions first.
 poetry run trade-tools transaction list
 poetry run trade-tools operations monthly-decision --new-contribution 500
-# The output contains a report path; the command never submits orders.
+# The output contains a report path; fills are modelled and recorded in the ledger.
 poetry run trade-tools operations show-decision 1
-# Only after actual execution, record fills as transactions:
+# If your real broker fills differ, reverse the modelled entry and record the real one:
+poetry run trade-tools transaction reverse 12
 poetry run trade-tools transaction record --type buy --date 2026-02-02 \
   --ticker VWCE.DE --quantity 2 --price 125 --fees 2
 ```
@@ -183,8 +196,16 @@ Daily TWR uses end-of-day cash-flow treatment: each return is
 `(ending NAV - same-day external deposits + same-day withdrawals) / prior NAV - 1`.
 Deposits/withdrawals are external flows; buys, sells, fees, and dividends remain
 inside portfolio NAV. Missing prices break the return interval rather than
-being silently forward-valued as zero. The dashboard is a file, not a deployed
-web application.
+being silently forward-valued as zero. The CLI command produces a static file.
+A continuously hosted, authenticated web application can also be deployed
+from the repository's `Dockerfile`; see the README's *Continuously hosted
+dashboard* section. The web service renders the dashboard from current
+database/report data on each request and refreshes the page every five minutes.
+It requires `DATABASE_URL`, `DASHBOARD_USERNAME`, and a `DASHBOARD_PASSWORD`
+of at least 16 characters. Monthly targets and proposed trades are persisted in
+the database; backtest report panels use local `reports/backtests` files and
+will be empty until those reports are present on the host. Place the service
+behind HTTPS/TLS and use a host secret manager for credentials.
 
 `monitoring_refresh.yml` runs weekly on Monday and on manual dispatch. It
 refreshes a tradable-universe backtest snapshot, generates the HTML dashboard,
@@ -197,6 +218,8 @@ does not add cloud services.
 - Ledger/accounting/proposals/TWR: `src/trade_tools/portfolio/operations.py`
 - Historical risk and scenarios: `src/trade_tools/portfolio/risk.py`
 - CLI and static monitoring: `src/trade_tools/cli.py`
+- Authenticated web dashboard: `src/trade_tools/web.py`, `src/trade_tools/wsgi.py`,
+  and `Dockerfile`
 - Settings: `config/research.json`
 - Workflows: `.github/workflows/monthly_decision.yml`,
   `.github/workflows/monitoring_refresh.yml`

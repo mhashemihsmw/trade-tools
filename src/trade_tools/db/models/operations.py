@@ -119,6 +119,27 @@ class DecisionItem(Base):
     exclusion_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class DecisionTrade(Base):
+    """Persisted proposed trade; this is a recommendation, never an execution."""
+
+    __tablename__ = "decision_trades"
+    __table_args__ = (
+        UniqueConstraint("decision_id", "ticker", name="uq_decision_trades_ticker"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_decisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_eur: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notional_eur: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_cost_eur: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class RiskAssessment(Base):
     """Persisted risk outputs for a decision, including assessed portfolios."""
 
