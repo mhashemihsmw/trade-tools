@@ -32,5 +32,6 @@ htmlcov/
 *.db
 *.sqlite3
 
-data/*
+reports/*
 *.csv
+*.html

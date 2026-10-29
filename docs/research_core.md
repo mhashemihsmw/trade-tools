@@ -256,9 +256,9 @@ poetry run pytest
 `monthly_decision.yml` runs at 08:00 UTC on days 1–3 after daily ingestion at
 06:00 UTC. It refreshes full adjusted history, checks staleness, and creates an
 idempotent persisted decision plus report; manual inputs support date,
-contribution, and explicit regeneration. `monitoring_refresh.yml` runs weekly
-and uploads the static monitoring report; it also refreshes a tradable
-backtest snapshot. `backtest.yml` is manual-only and uploads a run directory.
+contribution, and explicit regeneration. `monitoring_refresh.yml` runs daily
+at 09:00 UTC and uploads the static monitoring report; it also refreshes a
+tradable backtest snapshot. `backtest.yml` is manual-only and uploads a run directory.
 All workflows read `DATABASE_URL` only from `secrets.DATABASE_URL`. GitHub
 Actions cron timing can be delayed under load; scheduled workflows in public
 repositories are disabled after 60 days without repository activity. Run the

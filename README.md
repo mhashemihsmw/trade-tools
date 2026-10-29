@@ -325,7 +325,7 @@ Default research and risk parameters are in
 [`config/research.json`](./config/research.json). `monthly_decision.yml` runs at
 08:00 UTC on days 1–3, after daily ingestion at 06:00 UTC, persists one
 idempotent decision and uploads its report. `monitoring_refresh.yml` runs
-weekly on Monday and uploads a static HTML dashboard; `backtest.yml` is
+daily at 09:00 UTC and uploads a static HTML dashboard; `backtest.yml` is
 manual-only. A separately deployable, authenticated web dashboard is described
 below. GitHub Actions cron timing can be delayed, and scheduled workflows
 in public repositories can be disabled after 60 days without repository

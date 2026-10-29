@@ -207,7 +207,7 @@ the database; backtest report panels use local `reports/backtests` files and
 will be empty until those reports are present on the host. Place the service
 behind HTTPS/TLS and use a host secret manager for credentials.
 
-`monitoring_refresh.yml` runs weekly on Monday and on manual dispatch. It
+`monitoring_refresh.yml` runs daily at 09:00 UTC and on manual dispatch. It
 refreshes a tradable-universe backtest snapshot, generates the HTML dashboard,
 and uploads the report artifact. It uses only the existing database secret and
 does not add cloud services.
