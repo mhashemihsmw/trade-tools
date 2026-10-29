@@ -891,152 +891,146 @@ Recommended risk status: {html.escape(proposed_risk['status'])}; actual risk sta
 
 
 def generate_monitoring_dashboard(config_path: str, output: Path) -> Path:
-    """Render the current monitoring dashboard and return its output path."""
+    """Render the transaction-backed holdings and performance dashboard."""
     init_db()
-    _, _, portfolio_config = load_research_config(config_path)
+    load_research_config(config_path)
     with get_session() as session:
         prices, metadata = load_research_prices(session, base_currency="EUR")
         actual = derive_portfolio(session, prices, metadata=metadata)
-        nav, flows = portfolio_nav_history(session, prices, metadata=metadata)
-        twr = time_weighted_returns(nav, flows)
-        returns = aligned_daily_returns(pd.DataFrame({
-            ticker: frame["close"] for ticker, frame in prices.items() if "close" in frame
-        }))
-        actual_risk = validate_target_weights(
-            _actual_risk_positions(actual, metadata),
-            _risk_limits(portfolio_config),
-            asset_returns=returns,
-            stress_scenarios=portfolio_config.stress_scenarios,
+        holdings = actual["holdings"].copy()
+        effective_transactions = actual["transactions"]
+
+    # A holding must both have effective ledger activity and remain owned today.
+    transacted_ids = {
+        entry.asset_id for entry in effective_transactions if entry.asset_id is not None
+    }
+    if not holdings.empty:
+        holdings = holdings.loc[holdings["asset_id"].isin(transacted_ids)].copy()
+        holdings = holdings.sort_values("market_value_eur", ascending=False, na_position="last")
+
+    rows = []
+    performance_series: dict[str, pd.Series] = {}
+    for holding in holdings.itertuples(index=False):
+        ticker = str(holding.ticker)
+        frame = prices.get(ticker)
+        close = (
+            pd.to_numeric(frame["close"], errors="coerce").dropna().sort_index()
+            if frame is not None and "close" in frame else pd.Series(dtype=float)
         )
-        decisions = list(session.scalars(select(StrategyDecision).order_by(
-            StrategyDecision.decision_date.desc(), StrategyDecision.id.desc()
-        ).limit(36)))
-        latest = decisions[0] if decisions else None
-        latest_items = list(session.scalars(select(DecisionItem).where(
-            DecisionItem.decision_id == latest.id
-        ).order_by(DecisionItem.rank))) if latest else []
-        latest_risk = session.scalar(select(RiskAssessment).where(
-            RiskAssessment.decision_id == latest.id
-        )) if latest else None
-        latest_trades = list(session.scalars(select(DecisionTrade).where(
-            DecisionTrade.decision_id == latest.id
-        ).order_by(DecisionTrade.ticker))) if latest else []
-        risk_history = list(session.scalars(select(RiskAssessment).order_by(
-            RiskAssessment.created_at.desc()
-        ).limit(36)))
+        asset_trades = [
+            entry for entry in effective_transactions
+            if entry.asset_id == holding.asset_id and entry.transaction_type in {"buy", "sell"}
+        ]
+        first_trade = min((entry.trade_date for entry in asset_trades), default=None)
+        since_first = close.loc[close.index >= pd.Timestamp(first_trade, tz="UTC")] if first_trade else close
+        if not since_first.empty and since_first.iloc[0] > 0:
+            performance_series[ticker] = (since_first / since_first.iloc[0] - 1) * 100
+        previous_close = close.iloc[-2] if len(close) > 1 else np.nan
+        daily_change = (
+            close.iloc[-1] / previous_close - 1
+            if len(close) > 1 and np.isfinite(previous_close) and previous_close > 0
+            else np.nan
+        )
+        basis = float(holding.average_cost_eur * holding.quantity)
+        rows.append({
+            "ticker": ticker,
+            "name": metadata.get(ticker, {}).get("name") or ticker,
+            "quantity": holding.quantity,
+            "invested_eur": basis,
+            "value_eur": holding.market_value_eur,
+            "daily_return": daily_change,
+            "pnl_eur": holding.unrealized_pnl_eur,
+            "return_pct": holding.unrealized_return,
+        })
 
-    ranking_frame = pd.DataFrame([{
-        "ticker": item.ticker,
-        "score": item.score,
-        "rank": item.rank,
-        "selected": item.selected,
-        "recommended_target_weight": item.target_weight,
-        "exclusion": item.exclusion_reason,
-    } for item in latest_items])
-    target_frame = pd.DataFrame([{
-        "ticker": item.ticker,
-        "weight": item.target_weight,
-        "target_value": item.feature_values.get("target_value_eur"),
-    } for item in latest_items if item.selected and item.target_weight > 0])
-    trade_frame = pd.DataFrame([{
-        "ticker": trade.ticker,
-        "side": trade.side,
-        "quantity": trade.quantity,
-        "price_eur": trade.price_eur,
-        "notional_eur": trade.notional_eur,
-        "estimated_cost_eur": trade.estimated_cost_eur,
-        "reason": trade.reason,
-    } for trade in latest_trades])
-    if latest and latest.report_path and (target_frame.empty or trade_frame.empty):
-        report_directory = Path(latest.report_path).parent
-        try:
-            if target_frame.empty:
-                target_frame = pd.read_csv(report_directory / "recommended_targets.csv")
-            if trade_frame.empty:
-                trade_frame = pd.read_csv(report_directory / "proposed_trades.csv")
-        except FileNotFoundError:
-            logger.warning("Persisted report artifacts are missing for decision %s", latest.id)
+    total_invested = sum(row["invested_eur"] for row in rows if np.isfinite(row["invested_eur"]))
+    fully_priced = all(np.isfinite(row["value_eur"]) for row in rows)
+    total_value = sum(row["value_eur"] for row in rows) if fully_priced else np.nan
+    total_pnl = total_value - total_invested if fully_priced else np.nan
+    total_return = total_pnl / total_invested if fully_priced and total_invested > 0 else np.nan
 
-    backtest_runs = []
-    backtest_monthly_tables = []
-    ic_tables = []
-    for summary_path in sorted(Path("reports/backtests").glob("*/summary.json")):
-        try:
-            summary = json.loads(summary_path.read_text())
-            run_id = summary.get("run_id", summary_path.parent.name)
-            for portfolio, metrics in summary.get("metrics", {}).items():
-                if isinstance(metrics, dict) and "cumulative_return" in metrics:
-                    backtest_runs.append({"run_id": run_id, "portfolio": portfolio, **metrics})
-            monthly_path = summary_path.parent / "monthly_returns.csv"
-            if monthly_path.exists():
-                monthly = pd.read_csv(monthly_path)
-                monthly.insert(0, "run_id", run_id)
-                backtest_monthly_tables.append(monthly.tail(36))
-            ic_path = summary_path.parent / "ic.csv"
-            if ic_path.exists():
-                ic = pd.read_csv(ic_path)
-                ic.insert(0, "run_id", run_id)
-                ic_tables.append(ic.tail(36))
-        except (OSError, json.JSONDecodeError, ValueError):
-            logger.warning("Skipping unreadable backtest report %s", summary_path)
-    nav_frame = pd.DataFrame({"date": nav.index.astype(str), "actual_portfolio_value_eur": nav.values})
-    twr_frame = pd.DataFrame({"date": twr.index.astype(str), "actual_daily_twr": twr.values})
-    returns_frame = pd.concat(backtest_monthly_tables, ignore_index=True) if backtest_monthly_tables else pd.DataFrame()
-    ic_frame = pd.concat(ic_tables, ignore_index=True) if ic_tables else pd.DataFrame()
-    risk_frame = pd.DataFrame([{
-        "created_at": assessment.created_at.isoformat(),
-        "status": assessment.status,
-        "assessment": json.dumps(_json_safe(assessment.metrics), sort_keys=True),
-    } for assessment in risk_history])
+    def money(value: float) -> str:
+        return f"€{value:,.2f}" if np.isfinite(value) else "—"
 
-    def render(frame: pd.DataFrame, empty_message: str) -> str:
-        return frame.to_html(index=False, escape=True, na_rep="") if not frame.empty else f"<p>{html.escape(empty_message)}</p>"
+    def percent(value: float) -> str:
+        return f"{value:+.2%}" if np.isfinite(value) else "—"
 
+    def chart(series_by_name: dict[str, pd.Series]) -> str:
+        if not series_by_name:
+            return '<div class="empty">Price history will appear when daily prices are available.</div>'
+        width, height = 900, 310
+        left, right, top, bottom = 64, 24, 22, 46
+        values = np.concatenate([series.to_numpy(dtype=float) for series in series_by_name.values()])
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+        span = max(high - low, 1.0)
+        low -= span * .08
+        high += span * .08
+        x0, x1, y0, y1 = left, width - right, top, height - bottom
+        start = min(series.index[0] for series in series_by_name.values())
+        end = max(series.index[-1] for series in series_by_name.values())
+        date_span = max((end - start).total_seconds(), 1.0)
+        pieces = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Asset price performance since first transaction">']
+        for fraction in (0, .5, 1):
+            y = y1 - fraction * (y1 - y0)
+            label = high - fraction * (high - low)
+            pieces.append(f'<line x1="{x0}" y1="{y:.1f}" x2="{x1}" y2="{y:.1f}" class="grid"/><text x="{x0-10}" y="{y+4:.1f}" text-anchor="end">{label:.0f}%</text>')
+        zero_y = y1 - (0 - low) / (high - low) * (y1 - y0)
+        pieces.append(f'<line x1="{x0}" y1="{zero_y:.1f}" x2="{x1}" y2="{zero_y:.1f}" class="zero"/>')
+        palette = ["#2563eb", "#0f9d78", "#e28b24", "#8957d5", "#dc5474", "#0891b2"]
+        labels = []
+        for index, (ticker, series) in enumerate(series_by_name.items()):
+            color = palette[index % len(palette)]
+            points = []
+            for timestamp, value in series.items():
+                x = x0 + ((timestamp - start).total_seconds() / date_span) * (x1 - x0)
+                y = y1 - (value - low) / (high - low) * (y1 - y0)
+                points.append(f"{x:.1f},{y:.1f}")
+            pieces.append(f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>')
+            labels.append(f'<span><i style="background:{color}"></i>{html.escape(ticker)}</span>')
+        pieces.append(f'<text x="{x0}" y="{height-14}">{html.escape(str(start.date()))}</text><text x="{x1}" y="{height-14}" text-anchor="end">{html.escape(str(end.date()))}</text></svg>')
+        return ''.join(pieces) + '<div class="legend">' + ''.join(labels) + '</div>'
+
+    if rows:
+        table_rows = []
+        for row in rows:
+            direction = "positive" if row["return_pct"] > 0 else "negative" if row["return_pct"] < 0 else "neutral"
+            table_rows.append(
+                '<tr>'
+                f'<td><strong>{html.escape(row["ticker"])}</strong><small>{html.escape(row["name"])}</small></td>'
+                f'<td>{row["quantity"]:,.6g}</td><td>{money(row["invested_eur"])}</td>'
+                f'<td>{money(row["value_eur"])}</td><td class="{direction}">{percent(row["daily_return"])}</td>'
+                f'<td>{money(row["pnl_eur"])}</td><td class="{direction}">{percent(row["return_pct"])}</td></tr>'
+            )
+        table = ('<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Units</th>'
+                 '<th>Invested</th><th>Current value</th><th>Daily change</th>'
+                 '<th>Unrealized P&amp;L</th><th>Return</th></tr></thead><tbody>'
+                 + ''.join(table_rows) + '</tbody></table></div>')
+    else:
+        table = '<div class="empty">No current holdings with effective buy or sell transactions were found.</div>'
+
+    generated = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Trade Tools Monitoring</title>
-<style>body{{font:15px system-ui;max-width:1280px;margin:2rem auto;padding:0 1rem;color:#17212b}}
-table{{border-collapse:collapse;font-size:13px;margin:1rem 0 2rem;display:block;overflow:auto}}
-th,td{{border:1px solid #ccd2d8;padding:.4rem;white-space:nowrap}}th{{background:#eef2f6}}
-section{{margin:2rem 0;padding-top:1rem;border-top:2px solid #d5dbe2}}.actual{{color:#125d3a}}
-.recommended{{color:#124d83}}small{{color:#52606d}}</style></head><body>
-<h1>Trade Tools — monitoring snapshot</h1>
-<p>Generated {datetime.now(timezone.utc).isoformat()}. All figures are labeled actual or recommended;
-trades from monthly decisions are modelled fills, not broker orders.</p>
-<section><h2>A. Strategy</h2>
-<p>Latest persisted decision: {latest.decision_date.isoformat() if latest else 'none'};
-{html.escape(latest.strategy_name) if latest else '—'} v{html.escape(latest.strategy_version) if latest else '—'};
-universe {html.escape(latest.universe_mode) if latest else '—'}.</p>
-<h3>Latest saved ranking and selection</h3>{render(ranking_frame, 'No persisted decision yet.')}
-<h3>Backtest summary metrics (hypothetical)</h3>{render(pd.DataFrame(backtest_runs), 'No backtest reports found.')}
-<h3>Historical monthly backtest returns</h3>{render(returns_frame, 'No monthly backtest returns found.')}
-<h3>Backtest rank IC, quintile spread and labeled selection hit rate</h3>{render(ic_frame, 'No ranking-quality history found.')}
-<small>Backtest metric panels disclose in-sample/holdout splits in each run summary; backtests are not actual returns.</small>
-</section>
-<section><h2>B. Current portfolio and next allocation</h2>
-<h3 class="actual">Actual holdings and weights</h3>
-{render(actual['holdings'], 'No actual holdings recorded.')}
-<p class="actual">ACTUAL value EUR {actual['portfolio_value_eur']:.2f}; cash EUR {actual['cash_eur']:.2f};
-realized P&amp;L EUR {actual['realized_pnl_eur']:.2f}; unrealized P&amp;L EUR {actual['unrealized_pnl_eur']:.2f}.</p>
-<p>Valuation completeness: {actual['valuation_complete']}; unpriced actual holdings: {html.escape(', '.join(actual['unpriced_tickers']) or 'none')}.</p>
-<h3 class="recommended">Recommended targets from latest persisted decision</h3>{render(target_frame, 'No saved recommendation.')}
-<h3 class="recommended">Latest decision trades (assumed fills; recorded in ledger when auto-record was on)</h3>{render(trade_frame, 'No proposed trades.')}
-<p>Next decision date: {(latest.decision_date + pd.offsets.MonthEnd(1)).date().isoformat() if latest else 'not scheduled'}.</p>
-<p>Latest recommended risk status: {html.escape(latest_risk.status) if latest_risk else 'not assessed'}.
-Actual risk status: {html.escape(actual_risk['status'])}.</p>
-<pre>{html.escape(json.dumps(_json_safe({'latest_decision_risk': latest_risk.metrics if latest_risk else None, 'current_actual_risk': actual_risk}), indent=2))}</pre>
-</section>
-<section><h2>C. Overall actual portfolio</h2>
-<p>Current actual value EUR {actual['portfolio_value_eur']:.2f}; cumulative net contributions EUR {sum(flows.values()):.2f};
-realized P&amp;L EUR {actual['realized_pnl_eur']:.2f}; unrealized P&amp;L EUR {actual['unrealized_pnl_eur']:.2f};
-daily time-weighted return cumulative {(float((1 + twr).prod() - 1) if not twr.empty else 0.0):.2%}.
-Daily TWR assumes same-day deposits and withdrawals occur at close.</p>
-<h3>Actual portfolio value history</h3>{render(nav_frame, 'No portfolio history.')}
-<h3>Actual daily time-weighted return history</h3>{render(twr_frame, 'No TWR intervals yet.')}
-<h3>Historical VaR/CVaR and risk assessment history</h3>{render(risk_frame, 'No saved risk assessments.')}
-<p>VaR/CVaR use overlapping 1-day and 21-day historical return windows, positive-loss sign convention,
-and empirical lower-order-statistic thresholds. These are historical estimates, not forecasts.</p>
-</section></body></html>""")
+    output.write_text(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Portfolio performance</title>
+<style>
+:root{{--ink:#172033;--muted:#718096;--line:#e5eaf1;--paper:#fff;--canvas:#f4f7fb;--blue:#2563eb}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}}
+.shell{{max-width:1240px;margin:auto;padding:42px 28px 64px}}header{{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:26px}}
+.eyebrow{{color:var(--blue);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}}h1{{font-size:30px;letter-spacing:-.04em;margin:5px 0 0}}header p,.muted{{color:var(--muted);margin:5px 0 0}}.stamp{{font-size:12px;color:var(--muted)}}
+.cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}}.card,.panel{{background:var(--paper);border:1px solid var(--line);border-radius:13px;box-shadow:0 2px 8px #18284808}}
+.card{{padding:19px 21px}}.label{{color:var(--muted);font-size:12px;font-weight:600}}.metric{{font-size:25px;letter-spacing:-.035em;font-weight:700;margin-top:5px}}.metric-sub{{font-size:12px;color:var(--muted);margin-top:2px}}
+.panel{{padding:23px 24px;margin-top:15px}}.panel-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:15px}}h2{{font-size:16px;margin:0;letter-spacing:-.02em}}.panel-head p{{margin:4px 0 0;color:var(--muted);font-size:12px}}
+svg{{width:100%;height:auto;display:block;overflow:visible}}svg text{{fill:#8994a5;font-size:11px}}.grid{{stroke:#e9edf3;stroke-width:1}}.zero{{stroke:#9aa6b7;stroke-width:1;stroke-dasharray:4 5}}.legend{{display:flex;flex-wrap:wrap;gap:15px;margin-top:12px;color:#4b5565;font-size:12px}}.legend span{{display:flex;align-items:center;gap:6px}}.legend i{{width:9px;height:9px;border-radius:50%;display:inline-block}}
+.table-wrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;white-space:nowrap}}th{{text-align:right;color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;padding:11px 12px;border-bottom:1px solid var(--line)}}td{{text-align:right;padding:13px 12px;border-bottom:1px solid #edf0f5;font-variant-numeric:tabular-nums}}th:first-child,td:first-child{{text-align:left}}tbody tr:last-child td{{border-bottom:0}}td small{{display:block;color:var(--muted);font-size:11px;margin-top:2px}}.positive{{color:#07805b;font-weight:650}}.negative{{color:#c34455;font-weight:650}}.neutral{{color:#596579}}.empty{{padding:30px;color:var(--muted);text-align:center;background:#f9fafc;border:1px dashed #d9e0ea;border-radius:9px}}
+footer{{text-align:center;color:var(--muted);font-size:11px;margin-top:18px}}@media(max-width:720px){{.shell{{padding:26px 15px 40px}}header{{display:block}}.stamp{{margin-top:12px}}.cards{{grid-template-columns:1fr}}.panel{{padding:18px 15px}}.metric{{font-size:22px}}}}
+</style></head><body><main class="shell"><header><div><div class="eyebrow">Portfolio overview</div><h1>Performance</h1><p>Daily view of assets currently held in your transaction ledger.</p></div><div class="stamp">Updated {generated}</div></header>
+<section class="cards"><article class="card"><div class="label">Invested amount</div><div class="metric">{money(total_invested)}</div><div class="metric-sub">Remaining cost basis of current holdings</div></article>
+<article class="card"><div class="label">Current value</div><div class="metric">{money(total_value)}</div><div class="metric-sub">Latest available daily closing prices</div></article>
+<article class="card"><div class="label">Performance</div><div class="metric {'positive' if total_return > 0 else 'negative' if total_return < 0 else 'neutral'}">{percent(total_return)}</div><div class="metric-sub">{money(total_pnl)} unrealized gain / loss</div></article></section>
+<section class="panel"><div class="panel-head"><div><h2>Asset price performance</h2><p>Daily close, indexed to 0% on each asset’s first recorded transaction date.</p></div></div>{chart(performance_series)}</section>
+<section class="panel"><div class="panel-head"><div><h2>Current holdings</h2><p>Invested amount and unrealized performance for each asset you currently own.</p></div><div class="stamp">{len(rows)} assets</div></div>{table}</section>
+<footer>Daily change compares the latest close with the prior available close. Return is unrealized P&amp;L divided by remaining average cost basis. All values in EUR.</footer>
+</main></body></html>""", encoding="utf-8")
     return output
 
 
