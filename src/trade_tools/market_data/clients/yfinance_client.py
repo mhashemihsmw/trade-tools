@@ -4,6 +4,8 @@ from typing import Dict, Any, Optional, Union
 import pandas as pd
 import yfinance as yf
 
+from trade_tools.config import redact_connection_strings
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +41,7 @@ class YahooFinanceClient:
             metadata["sector"] = info.get("sector")
 
         except Exception as e:
-            logger.error(f"Error fetching metadata for ticker {ticker}: {e}")
+            logger.error("Error fetching metadata for ticker %s: %s", ticker, redact_connection_strings(e))
 
         return metadata
 
@@ -122,5 +124,10 @@ class YahooFinanceClient:
             return df[required_cols]
 
         except Exception as e:
-            logger.error(f"Failed to fetch prices for ticker {ticker} ({interval}): {e}")
+            logger.error(
+                "Failed to fetch prices for ticker %s (%s): %s",
+                ticker,
+                interval,
+                redact_connection_strings(e),
+            )
             return empty_df

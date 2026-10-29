@@ -1,6 +1,34 @@
+import os
+from pathlib import Path
+
 import pytest
+from dotenv import dotenv_values
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+_repo_root = Path(__file__).resolve().parents[1]
+_production_database_url = dotenv_values(_repo_root / ".env").get("DATABASE_URL")
+_configured_database_url = os.environ.get("DATABASE_URL")
+_test_database_url = os.environ.get("TEST_DATABASE_URL", "sqlite:///:memory:")
+
+
+def ensure_isolated_test_database(
+    configured_url: str | None,
+    test_url: str | None,
+    production_url: str | None,
+) -> None:
+    if production_url and configured_url == production_url:
+        raise pytest.UsageError("Tests refuse to run with the production database configured.")
+    if production_url and test_url == production_url:
+        raise pytest.UsageError("TEST_DATABASE_URL must not point to the production database.")
+
+
+ensure_isolated_test_database(
+    _configured_database_url,
+    _test_database_url,
+    _production_database_url,
+)
+os.environ["DATABASE_URL"] = _test_database_url
 
 from trade_tools.db import Base
 from trade_tools.market_data.clients.yfinance_client import YahooFinanceClient

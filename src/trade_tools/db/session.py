@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from trade_tools.config import config
+from trade_tools.config import config, redact_connection_strings
 from trade_tools.db.base import Base
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,18 @@ def get_engine(db_url: Optional[str] = None) -> Engine:
         connect_args = {}
         if url.startswith("sqlite"):
             connect_args["check_same_thread"] = False
-        engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+        try:
+            engine = create_engine(
+                url,
+                connect_args=connect_args,
+                pool_pre_ping=True,
+                hide_parameters=True,
+            )
+        except Exception as exc:
+            safe_message = redact_connection_strings(exc)
+            if safe_message != str(exc):
+                raise RuntimeError(safe_message) from None
+            raise
         if db_url is None:
             _engine = engine
         return engine
@@ -54,8 +65,11 @@ def get_session(engine: Optional[Engine] = None) -> Generator[Session, None, Non
     try:
         yield session
         session.commit()
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        safe_message = redact_connection_strings(exc)
+        if safe_message != str(exc):
+            raise RuntimeError(safe_message) from None
         raise
     finally:
         session.close()

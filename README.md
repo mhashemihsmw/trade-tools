@@ -47,13 +47,15 @@ src/trade_tools/
 │   ├── clients/
 │   │   └── yfinance_client.py # Yahoo Finance client wrapper
 │   ├── classification.py      # Manual style-box / bond-matrix classifications
+│   ├── research_universe.py   # Manual fund/tradability/exposure classifications
+│   ├── research_prices.py     # Point-in-time base-currency data access
 │   ├── initial_universe.py    # Seed universe definition (99 current assets)
 │   ├── validation.py          # Price validation and cleaning
 │   └── ingestion.py           # Orchestrator for metadata and price updates
 ├── jobs/                      # Job entry points (init_db, ingest_market_data)
-├── strategies/                # (Extension namespace for trade strategies)
-├── portfolio/                 # (Extension namespace for portfolio optimization)
-└── features/                  # (Extension namespace for feature engineering / ML)
+├── strategies/                # Adaptive momentum and monthly backtesting
+├── portfolio/                 # Target weights and independent risk checks
+└── features/                  # Pure point-in-time price features
 ```
 
 ---
@@ -278,7 +280,40 @@ asleep. GitHub Actions runs independently of your machine.
 
 ---
 
-## 11. Basic Troubleshooting
+## 11. Research Core (Version 1a)
+
+The research layer consumes existing daily prices and adds no database tables.
+See the [research-core guide](./docs/research_core.md) for architecture, the
+full proposed 99-asset classification table, price and currency conventions,
+eligibility, strategy, risk checks, bias disclosures, and limitations.
+
+```bash
+# Refresh Yahoo's adjusted history through the existing ingestion pipeline
+poetry run trade-tools refresh-adjusted-history
+
+# Point-in-time signals and read-only portfolio targets
+poetry run trade-tools strategy signals --date 2025-12-31 --output signals.csv
+poetry run trade-tools portfolio target --date 2025-12-31 --capital 10000
+poetry run trade-tools strategy monthly-report
+
+# Monthly simulation and ablation comparison
+poetry run trade-tools backtest run --universe-mode tradable
+poetry run trade-tools backtest run --universe-mode research --ablation-off --include-holdout
+poetry run trade-tools backtest compare <run_id> <run_id>
+```
+
+Default research parameters are in [`config/research.json`](./config/research.json).
+`monthly_signals.yml` runs after month end and uploads signals, exclusions,
+targets, and risk results; `backtest.yml` is manual-only and uploads a run
+directory. GitHub Actions cron timing can be delayed, and scheduled workflows
+in public repositories can be disabled after 60 days without repository
+activity. Both workflows read `DATABASE_URL` only from the Actions secret.
+Signals, targets, and backtests do not write to the database; a full adjusted
+history refresh is an explicit ingestion operation.
+
+---
+
+## 12. Basic Troubleshooting
 
 1. **Database Connection Errors**:
    Verify `DATABASE_URL` is set correctly and that your cloud PostgreSQL

@@ -86,7 +86,9 @@ Initial assets:
 | JPY=X | fx |
 | CHF=X | fx |
 
-The seed universe has since been extended with 35 additional UCITS ETF/ETC listings:
+The first expansion added 35 UCITS ETF/ETC listings. The seed universe was
+later extended by 19 more, for **54 additional listings** and **99 total seeded
+assets** (45 original assets plus 54 additions). The first 35 additions are:
 
 | ticker | type |
 |---|---|
@@ -125,6 +127,30 @@ The seed universe has since been extended with 35 additional UCITS ETF/ETC listi
 | KWBE.DE | etf |
 | PPFB.DE | commodity |
 | VAGF.DE | etf |
+
+The later 19 additions are:
+
+| ticker | type |
+|---|---|
+| COPA.L | commodity |
+| CRUD.MI | commodity |
+| NGAS.L | commodity |
+| CORN.L | commodity |
+| WEAT.L | commodity |
+| SOYB.MI | commodity |
+| ETL2.DE | commodity |
+| AGAP.L | commodity |
+| INDU.L | commodity |
+| IS00.MU | etf |
+| IUST.DE | etf |
+| IUS5.DE | etf |
+| IS04.DE | etf |
+| IBCD.DE | etf |
+| EUN5.DE | etf |
+| IUS7.DE | etf |
+| 36BD.DE | etf |
+| VWCG.DE | etf |
+| IQQ6.DE | reit |
 
 Two additional requested Asia ex-Japan products were withheld pending exact
 instrument identification: the closest iShares Yahoo result is non-UCITS, and

@@ -31,3 +31,6 @@ htmlcov/
 # Database
 *.db
 *.sqlite3
+
+data/*
+*.csv

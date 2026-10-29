@@ -1,0 +1,47 @@
+{
+  "backtest": {
+    "start": null,
+    "end": null,
+    "universe_mode": "tradable",
+    "base_currency": "EUR",
+    "backtest_capital": 10000.0,
+    "proportional_cost_bps": 10.0,
+    "fixed_fee": 2.0,
+    "minimum_trade_size": 0.0,
+    "annual_cash_rate": 0.0,
+    "annual_risk_free_rate": 0.0,
+    "holdout_months": 36,
+    "include_holdout": false,
+    "passive_proxy_enabled": true,
+    "monthly_contribution": 0.0
+  },
+  "strategy": {
+    "top_n": 5,
+    "universe_mode": "tradable",
+    "minimum_history": 252,
+    "history_buffer": 0,
+    "max_stale_trading_days": 5,
+    "volatility_window": 63,
+    "trend_months": 10,
+    "trend_days": null,
+    "max_assets_per_exposure_group": 1,
+    "cash_threshold": 0.0,
+    "volatility_adjusted": true,
+    "absolute_momentum_filter": true,
+    "trend_filter": true,
+    "horizon_weights": [12.0, 4.0, 2.0, 1.0],
+    "include_tickers": [],
+    "exclude_tickers": [],
+    "include_exposure_groups": [],
+    "exclude_exposure_groups": []
+  },
+  "portfolio": {
+    "top_n": 5,
+    "inverse_volatility": true,
+    "max_asset_weight": 0.3,
+    "max_exposure_group_weight": 0.3,
+    "volatility_target": 0.1,
+    "volatility_targeting": true,
+    "covariance_window": 63
+  }
+}

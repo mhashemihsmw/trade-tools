@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -24,3 +25,17 @@ class Config:
 
 
 config = Config()
+
+
+_DATABASE_URL_PATTERN = re.compile(
+    r"\b(?:postgres(?:ql)?|sqlite(?:\+\w+)?|mysql(?:\+\w+)?|mariadb(?:\+\w+)?)://[^\s\"'<>]+",
+    re.IGNORECASE,
+)
+
+
+def redact_connection_strings(message: object) -> str:
+    """Redact configured and embedded database URLs before logs or CLI errors."""
+    text = str(message)
+    if config.DATABASE_URL:
+        text = text.replace(config.DATABASE_URL, "[REDACTED DATABASE URL]")
+    return _DATABASE_URL_PATTERN.sub("[REDACTED DATABASE URL]", text)

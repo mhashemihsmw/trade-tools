@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from trade_tools.config import config
+from trade_tools.config import config, redact_connection_strings
 from trade_tools.db.models import Asset, DailyPrice, HourlyPrice, VALID_ASSET_TYPES
 from trade_tools.db.session import get_session, upsert_prices, get_sessionmaker
 from trade_tools.market_data.clients.yfinance_client import YahooFinanceClient
@@ -100,7 +100,7 @@ class MarketDataIngestion:
             asset.metadata_updated_at = datetime.now(timezone.utc)
             return updated
         except Exception as e:
-            logger.error(f"Failed updating metadata for {asset.ticker}: {e}")
+            logger.error("Failed updating metadata for %s: %s", asset.ticker, redact_connection_strings(e))
             return False
 
     def get_latest_timestamp(self, session: Session, model_class: Any, asset_id: int) -> Optional[datetime]:
@@ -114,6 +114,7 @@ class MarketDataIngestion:
         asset: Asset,
         include_daily: bool = True,
         include_hourly: bool = True,
+        full_daily_history: bool = False,
     ) -> IngestionResult:
         """Ingest daily and/or hourly price data and metadata for a single asset."""
         result = IngestionResult(ticker=asset.ticker)
@@ -126,7 +127,7 @@ class MarketDataIngestion:
             # 2. Daily price ingestion
             if include_daily:
                 latest_daily = self.get_latest_timestamp(session, DailyPrice, asset.id)
-                if latest_daily:
+                if latest_daily and not full_daily_history:
                     start_daily = (latest_daily - timedelta(days=config.OVERLAP_DAYS_DAILY)).strftime("%Y-%m-%d")
                 else:
                     start_daily = config.HISTORICAL_START_DATE
@@ -193,9 +194,10 @@ class MarketDataIngestion:
             )
 
         except Exception as e:
-            logger.error(f"Error ingesting market data for {asset.ticker}: {e}", exc_info=True)
+            safe_error = redact_connection_strings(e)
+            logger.error("Error ingesting market data for %s: %s", asset.ticker, safe_error)
             result.status = "failed"
-            result.error = str(e)
+            result.error = safe_error
 
         return result
 
@@ -203,6 +205,7 @@ class MarketDataIngestion:
         self,
         include_daily: bool = True,
         include_hourly: bool = True,
+        full_daily_history: bool = False,
     ) -> JobSummary:
         """Ingest market data for all active assets in the database."""
         summary = JobSummary()
@@ -212,13 +215,16 @@ class MarketDataIngestion:
             self.seed_initial_assets(session)
 
             active_assets = list(session.scalars(select(Asset).where(Asset.active == True)))
-            return self._ingest_assets(session, active_assets, include_daily, include_hourly)
+            return self._ingest_assets(
+                session, active_assets, include_daily, include_hourly, full_daily_history
+            )
 
     def ingest_tickers(
         self,
         tickers: List[str],
         include_daily: bool = True,
         include_hourly: bool = True,
+        full_daily_history: bool = False,
     ) -> JobSummary:
         """Ingest only the specified active asset tickers."""
         requested_tickers = list(dict.fromkeys(ticker.strip().upper() for ticker in tickers))
@@ -241,7 +247,9 @@ class MarketDataIngestion:
                 raise ValueError(
                     "Unknown or inactive tickers: " + ", ".join(missing_tickers)
                 )
-            return self._ingest_assets(session, assets, include_daily, include_hourly)
+            return self._ingest_assets(
+                session, assets, include_daily, include_hourly, full_daily_history
+            )
 
     def _ingest_assets(
         self,
@@ -249,6 +257,7 @@ class MarketDataIngestion:
         assets: List[Asset],
         include_daily: bool,
         include_hourly: bool,
+        full_daily_history: bool = False,
     ) -> JobSummary:
         summary = JobSummary(total_active_assets=len(assets))
         logger.info(f"Starting ingestion job for {len(assets)} selected active assets.")
@@ -259,6 +268,7 @@ class MarketDataIngestion:
                 asset=asset,
                 include_daily=include_daily,
                 include_hourly=include_hourly,
+                full_daily_history=full_daily_history,
             )
             summary.results.append(result)
 
@@ -275,3 +285,11 @@ class MarketDataIngestion:
             f"inserted/updated {summary.total_daily_records} daily & {summary.total_hourly_records} hourly records."
         )
         return summary
+
+    def refresh_adjusted_history(self) -> JobSummary:
+        """Re-download and upsert full daily history for every active asset."""
+        return self.ingest_all_active(
+            include_daily=True,
+            include_hourly=False,
+            full_daily_history=True,
+        )
