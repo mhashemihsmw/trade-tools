@@ -339,8 +339,12 @@ def build_dashboard(
     settings = load_settings(settings_path or DEFAULT_SETTINGS_PATH)
     init_db()
     with get_session() as session:
-        prices = load_prices(session)
         transactions = load_transactions(session)
+        # Only what the page needs: traded funds + benchmark, from shortly before the
+        # first transaction (a few days earlier so the first day has a previous close).
+        tickers = [*transactions["ticker"].dropna().unique(), *settings.benchmark]
+        start = transactions["date"].min() - pd.Timedelta(days=10) if not transactions.empty else None
+        prices = load_prices(session, tickers=tickers, start=start)
         names = dict(session.execute(select(Asset.ticker, Asset.name)).all())
     summary = portfolio_summary(transactions, prices, settings.benchmark)
     page = render_html(

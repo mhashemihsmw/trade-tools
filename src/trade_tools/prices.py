@@ -141,14 +141,35 @@ def prices_from_long(
     return Prices(assemble("close"), assemble("adj_close"), assemble("adj_open"), skipped, notes)
 
 
-def load_prices(session: Session, *, base_currency: str = "EUR") -> Prices:
-    """Read every asset's daily history from the database (active or not) and convert to EUR."""
+FX_TICKERS = ("EURUSD=X", "GBPUSD=X", "JPY=X", "CHF=X")
+
+
+def load_prices(
+    session: Session,
+    *,
+    base_currency: str = "EUR",
+    tickers: list[str] | None = None,
+    start: pd.Timestamp | None = None,
+) -> Prices:
+    """Read daily history from the database (active or not) and convert to EUR.
+
+    By default everything is loaded. `tickers` and `start` limit the download (FX rates
+    are always included); the dashboard uses this because it only needs recent prices
+    of the funds you hold.
+    """
     assets = session.execute(select(Asset.id, Asset.ticker, Asset.currency)).all()
+    if tickers is not None:
+        wanted = set(tickers) | set(FX_TICKERS)
+        assets = [row for row in assets if row.ticker in wanted]
     ticker_by_id = {row.id: row.ticker for row in assets}
     statement = select(
         DailyPrice.asset_id, DailyPrice.timestamp, DailyPrice.open,
         DailyPrice.close, DailyPrice.adjusted_close,
     )
+    if tickers is not None:
+        statement = statement.where(DailyPrice.asset_id.in_(list(ticker_by_id)))
+    if start is not None:
+        statement = statement.where(DailyPrice.timestamp >= pd.Timestamp(start, tz="UTC"))
     rows = pd.DataFrame(session.execute(statement).all(), columns=[
         "asset_id", "timestamp", "open", "close", "adjusted_close",
     ])
