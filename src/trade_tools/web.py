@@ -5,12 +5,11 @@ from __future__ import annotations
 import hmac
 import logging
 import os
-import tempfile
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, request
 
-from trade_tools.cli import generate_monitoring_dashboard
+from trade_tools.dashboard import build_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 def create_app(
     username: str | None = None,
     password: str | None = None,
-    config_path: str | Path | None = None,
+    settings_path: str | Path | None = None,
 ) -> Flask:
     """Create the dashboard app; authentication credentials are mandatory."""
     expected_username = username if username is not None else os.getenv("DASHBOARD_USERNAME", "")
@@ -28,9 +27,7 @@ def create_app(
             "Set DASHBOARD_USERNAME and a DASHBOARD_PASSWORD of at least 16 characters."
         )
 
-    research_config = Path(
-        config_path or os.getenv("RESEARCH_CONFIG_PATH", "config/research.json")
-    )
+    settings_file = Path(settings_path or os.getenv("SETTINGS_PATH", "config/strategy.toml"))
     app = Flask(__name__)
 
     @app.before_request
@@ -71,12 +68,7 @@ def create_app(
     @app.get("/")
     def dashboard() -> Response:
         try:
-            with tempfile.TemporaryDirectory(prefix="trade-tools-dashboard-") as directory:
-                report_path = generate_monitoring_dashboard(
-                    str(research_config),
-                    Path(directory) / "index.html",
-                )
-                page = report_path.read_text(encoding="utf-8")
+            page = build_dashboard(settings_path=settings_file)
             page = page.replace(
                 "</head>",
                 '<meta http-equiv="refresh" content="300"></head>',

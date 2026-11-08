@@ -1,0 +1,38 @@
+# All strategy settings in one place. See docs/strategy.md for what each step does.
+# Candidate assets live in config/universe.csv.
+
+[selection]
+top_n = 5                  # number of portfolio slots; each empty slot stays in cash
+tradable_only = true       # true: only European-listed funds you can buy; false: also US-listed funds (research)
+min_history_days = 252     # trading days of history needed before an asset is considered
+max_stale_days = 5         # business days a price may lag the decision date
+absolute_momentum_filter = true   # require momentum > 0
+trend_filter = true               # require price > 10-month moving average
+
+[signals]
+momentum_weights = [12, 4, 2, 1]  # weights on 1, 3, 6, 12-month returns ("13612W" momentum)
+volatility_window = 63            # trading days for realised volatility
+volatility_adjusted = true        # rank by momentum / volatility instead of raw momentum
+trend_months = 10                 # months in the trend moving average
+
+[weights]
+inverse_volatility = true  # weight selected assets by 1/volatility (false: equal weights)
+max_weight = 0.30          # cap per asset; excess is redistributed to the other selected assets
+volatility_target = 0.10   # scale the portfolio down if its estimated volatility is higher (0 disables)
+covariance_window = 63     # trading days used to estimate portfolio volatility
+
+[costs]
+cost_bps = 10.0            # proportional cost per trade, basis points
+fixed_fee = 2.0            # EUR per trade
+min_trade_eur = 0.0        # suggested trades below this value are skipped
+fractional_shares = false  # false: suggested trades are rounded down to whole units
+
+[backtest]
+start = ""                 # "YYYY-MM-DD" or empty for all history
+end = ""
+initial_capital = 10000.0
+monthly_contribution = 0.0
+cash_rate = 0.0            # annual interest on cash
+risk_free_rate = 0.0       # annual, used for the Sharpe ratio
+holdout_months = 36        # last N months reported separately as out-of-sample
+benchmark = ["VWCE.DE", "VT"]  # buy-and-hold comparison; first one with data is used each month

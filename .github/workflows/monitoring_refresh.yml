@@ -24,20 +24,15 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      - name: Refresh strategy backtest snapshot
+      - name: Generate portfolio dashboard
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: poetry run trade-tools backtest run --universe-mode tradable
-
-      - name: Generate static monitoring dashboard
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: poetry run trade-tools operations monitor-refresh
+        run: poetry run trade-tools dashboard
 
       - name: Upload monitoring dashboard
         uses: actions/upload-artifact@v4
         with:
           name: portfolio-monitoring-${{ github.run_id }}
-          path: reports/monitoring/index.html
+          path: reports/dashboard/index.html
           if-no-files-found: error
           retention-days: 90

@@ -35,3 +35,4 @@ htmlcov/
 reports/*
 *.csv
 *.html
+!config/universe.csv

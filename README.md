@@ -1,394 +1,157 @@
-# Trade Tools — Market Data Infrastructure
+# Trade Tools
 
-## 1. Project Purpose
+A personal toolkit for a **monthly momentum strategy on European-listed ETFs**:
+daily price data from Yahoo Finance, a monthly decision (which funds to hold and
+with what weights), a backtest of that decision over history, and a dashboard of
+your real portfolio built from the trades you record.
 
-`trade-tools` is a modular Python toolkit designed for personal long-term investment research, price data ingestion, feature engineering, trade strategies, portfolio optimization, backtesting, and rebalancing.
+No broker connection: the tool suggests trades, you place them, and you record
+what you actually got.
 
-This initial phase establishes the core **Market Data Infrastructure**:
-- Storing asset master data and metadata in PostgreSQL (or SQLite for development/testing).
-- Automated ingestion of historical daily (~20 years) and hourly price observations from Yahoo Finance.
-- Idempotent upserts and scheduled daily incremental updates.
-- Modular architecture allowing future strategy, portfolio, and ML/feature components to consume stored database data cleanly.
+## How the strategy works (short version)
 
----
+Every month-end, for each candidate fund in [config/universe.csv](config/universe.csv):
 
-## 2. Architecture
+1. **Eligible?** ≥ 252 trading days of history and a recent price.
+2. **One listing per index.** Several ETFs track e.g. the S&P 500; keep the preferred one.
+3. **Score** = momentum ÷ volatility, with momentum = (12·r1 + 4·r3 + 2·r6 + r12) / 4.
+4. **Filters**: momentum > 0 and price above its 10-month moving average.
+5. **Pick** the top 5 by score. Fewer passing → the empty slots stay in cash.
+6. **Weights**: inverse volatility, max 30% each, scaled down if the portfolio's
+   estimated volatility exceeds 10%.
 
-```text
-PostgreSQL / SQLite Database: assets
-        │
-        ▼
-MarketDataIngestion
-        │
-        ├──► YahooFinanceClient
-        │        │
-        │        └──► Yahoo Finance API (yfinance)
-        │
-        ▼
-PostgreSQL / SQLite Database
-        │
-        ├── daily_prices  (20+ years history)
-        └── hourly_prices (Max available history)
+Details, formulas and the reasoning behind each step: [docs/strategy.md](docs/strategy.md).
+Every number above is a setting in [config/strategy.toml](config/strategy.toml).
+
+## Monthly routine
+
+```bash
+poetry run trade-tools decide --contribution 500   # targets + suggested trades
+# ... place the trades with your broker ...
+poetry run trade-tools tx add --type deposit --date 2026-12-01 --quantity 500
+poetry run trade-tools tx add --type buy --date 2026-12-01 --ticker VWCE.DE \
+    --quantity 4 --price 123.45 --fees 2
+poetry run trade-tools dashboard                   # reports/dashboard/index.html
 ```
 
-The system is structured under `src/trade_tools/` into distinct modules:
+`decide` writes `reports/decisions/<date>/` with `summary.md`, `candidates.csv`
+(every fund with its signals and why it was or wasn't chosen) and `trades.csv`.
+The GitHub workflow runs it automatically on the 1st–3rd of each month.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `decide [--date D] [--contribution EUR]` | Monthly decision and suggested trades |
+| `backtest [--start D] [--end D]` | Run the decision over history; writes `reports/backtests/<timestamp>/` |
+| `tx add / list / reverse ID / import FILE` | Record real transactions (`buy`, `sell`, `deposit`, `withdrawal`, `fee`, `dividend`) |
+| `portfolio` | Print holdings and performance |
+| `dashboard [--output FILE]` | Write the portfolio dashboard HTML |
+| `ingest`, `backfill --ticker T`, `refresh-adjusted-history` | Update prices from Yahoo |
+| `init-db`, `asset list / add / deactivate / reactivate` | Database and asset master data |
+
+Transactions are never edited: `tx reverse ID` adds an opposite row instead. CSV import
+columns: `date,type,quantity[,ticker,price,fees,currency,fx_to_eur,notes,reference]`;
+`quantity` is units for buy/sell and an amount otherwise; non-EUR trades need `fx_to_eur`.
+
+## Analysis in a notebook
+
+Everything is plain pandas. [notebooks/walkthrough.py](notebooks/walkthrough.py) runs one
+monthly decision step by step and a backtest (open it in VS Code and run the `# %%` cells).
+
+```python
+import pandas as pd
+from trade_tools.db import get_session
+from trade_tools.prices import load_prices
+from trade_tools.settings import load_settings, load_universe
+from trade_tools.decision import make_decision
+from trade_tools.backtest import run_backtest
+
+settings, universe = load_settings(), load_universe()
+with get_session() as session:
+    prices = load_prices(session)          # wide EUR tables: prices.adj_close, ...
+decision = make_decision(prices, universe, settings, pd.Timestamp("2026-10-31"))
+decision.table                             # every candidate, signals, status, weight
+result = run_backtest(prices, universe, settings)
+result.metrics
+```
+
+## Project structure
 
 ```text
+config/
+  strategy.toml        all strategy settings
+  universe.csv         candidate funds: group, tradable, preferred
 src/trade_tools/
-├── config.py                  # Centralized environment configuration
-├── cli.py                     # Click CLI interface
-├── db/                        # Database ORM, engine, session, and models
-│   ├── base.py
-│   ├── session.py
-│   └── models/
-│       ├── asset.py           # Asset master table ORM
-│       └── price.py           # DailyPrice & HourlyPrice ORM models
-├── market_data/               # Market data ingestion domain logic
-│   ├── clients/
-│   │   └── yfinance_client.py # Yahoo Finance client wrapper
-│   ├── classification.py      # Manual style-box / bond-matrix classifications
-│   ├── research_universe.py   # Manual fund/tradability/exposure classifications
-│   ├── research_prices.py     # Point-in-time base-currency data access
-│   ├── initial_universe.py    # Seed universe definition (99 current assets)
-│   ├── validation.py          # Price validation and cleaning
-│   └── ingestion.py           # Orchestrator for metadata and price updates
-├── jobs/                      # Job entry points (init_db, ingest_market_data)
-├── strategies/                # Adaptive momentum and monthly backtesting
-├── portfolio/                 # Target weights and independent risk checks
-└── features/                  # Pure point-in-time price features
+  settings.py          load the two config files
+  prices.py            DB -> wide EUR price tables (close, adj_close, adj_open)
+  signals.py           returns, momentum, volatility, trend per asset
+  selection.py         eligibility, one listing per group, filters, top N
+  weights.py           inverse volatility, caps, volatility target
+  decision.py          make_decision (the steps above) + suggested trades
+  backtest.py          make_decision at every past month-end + accounting + metrics
+  ledger.py            transactions -> holdings, cash, daily value, time-weighted return
+  dashboard.py         portfolio summary + HTML page
+  web.py, wsgi.py      password-protected web server for the dashboard
+  cli.py               the commands above
+  db/                  SQLAlchemy models: assets, daily/hourly prices, transactions
+  market_data/         Yahoo Finance ingestion (asset seed list, validation, style boxes)
+tests/                 pytest; uses an in-memory database, never the real one
 ```
 
----
+## Setup
 
-## 3. Database Schema
-
-### Asset Master Table (`assets`)
-| Column | Type | Constraints / Description |
-|---|---|---|
-| `id` | Integer | Primary Key, Autoincrement |
-| `ticker` | String(32) | Unique, Index, Non-null |
-| `type` | String(32) | Controlled asset type (`equity`, `etf`, `reit`, `fixed_income_proxy`, `commodity`, `crypto`, `index`, `fx`) |
-| `name` | String(255) | Nullable asset name |
-| `currency` | String(16) | Nullable currency code (e.g. USD, EUR) |
-| `exchange` | String(64) | Nullable exchange name |
-| `country` | String(64) | Nullable country |
-| `sector` | String(128) | Nullable sector |
-| `style_box_category` | String(32) | Equity/REIT style box (e.g. `Large Blend`), else `N/A` |
-| `bond_matrix_category` | String(32) | Fixed-income duration/quality (e.g. `Intermediate High-Quality`), else `N/A` |
-| `data_source` | String(64) | Default `'yahoo_finance'` |
-| `active` | Boolean | Non-null, default `True` (controls ingestion) |
-| `created_at` | DateTime(tz=True) | Non-null UTC timestamp |
-| `updated_at` | DateTime(tz=True) | Non-null UTC timestamp |
-| `deactivated_at` | DateTime(tz=True) | Nullable UTC timestamp |
-| `metadata_updated_at` | DateTime(tz=True) | Nullable UTC timestamp |
-
-### Daily Prices Table (`daily_prices`)
-| Column | Type | Constraints / Description |
-|---|---|---|
-| `id` | Integer | Primary Key |
-| `asset_id` | Integer | Foreign Key (`assets.id`, CASCADE) |
-| `timestamp` | DateTime(tz=True) | Market observation timestamp in UTC |
-| `open` | Float | Nullable |
-| `high` | Float | Nullable |
-| `low` | Float | Nullable |
-| `close` | Float | Nullable |
-| `adjusted_close` | Float | Nullable |
-| `volume` | Float | Nullable |
-| `created_at` | DateTime(tz=True) | UTC insertion time |
-
-- **Unique Constraint**: `(asset_id, timestamp)`
-- **Index**: `(asset_id, timestamp)`
-
-### Hourly Prices Table (`hourly_prices`)
-| Column | Type | Constraints / Description |
-|---|---|---|
-| `id` | Integer | Primary Key |
-| `asset_id` | Integer | Foreign Key (`assets.id`, CASCADE) |
-| `timestamp` | DateTime(tz=True) | Market observation timestamp in UTC |
-| `open` | Float | Nullable |
-| `high` | Float | Nullable |
-| `low` | Float | Nullable |
-| `close` | Float | Nullable |
-| `adjusted_close` | Float | Nullable |
-| `volume` | Float | Nullable |
-| `created_at` | DateTime(tz=True) | UTC insertion time |
-
-- **Unique Constraint**: `(asset_id, timestamp)`
-- **Index**: `(asset_id, timestamp)`
-
----
-
-## 4. Configuration
-
-Configuration is managed via environment variables or a `.env` file in the root directory:
-
-| Environment Variable | Default Value | Description |
-|---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/trade_tools` | SQLAlchemy connection string |
-| `HISTORICAL_START_DATE` | `2005-01-01` | Default start date for initial daily price ingestion |
-| `OVERLAP_DAYS_DAILY` | `5` | Days of overlap during incremental daily ingestion |
-| `OVERLAP_DAYS_HOURLY` | `2` | Days of overlap during incremental hourly ingestion |
-| `LOG_LEVEL` | `INFO` | Logging level |
-
----
-
-## 5. Installation
-
-Prerequisites: Python 3.11+, Poetry, and a PostgreSQL database.
+Python 3.11+, Poetry and a PostgreSQL database reachable from your machine and from
+GitHub Actions (e.g. a free [Neon](https://neon.tech) project).
 
 ```bash
-# Clone the repository
-cd trade-tools
-
-# Install dependencies and package with Poetry
 poetry install
+echo 'DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require' > .env
+poetry run trade-tools init-db      # create tables and seed the 99-asset list
+poetry run trade-tools ingest       # ~20 years of daily prices on first run
+poetry run pytest                   # tests refuse to run against the .env database
 ```
 
-Create a `.env` file in the project root and set `DATABASE_URL` to your
-PostgreSQL connection string. The file is ignored by Git, so credentials stay
-local.
+Don't `source .env` or let your editor export it into the terminal: the app reads
+`.env` itself, and the tests refuse to start if `DATABASE_URL` points at it.
 
-### Database Hosting
+Other environment variables: `HISTORICAL_START_DATE` (default `2005-01-01`),
+`OVERLAP_DAYS_DAILY` (5), `OVERLAP_DAYS_HOURLY` (2), `LOG_LEVEL` (`INFO`).
 
-This project uses a cloud-hosted PostgreSQL database rather than a local Docker
-container, since the database must be reachable both from your machine and from
-the scheduled GitHub Actions workflow. A free option is [Neon](https://neon.tech)
-(serverless Postgres, generous free tier, no credit card required):
+### Price data
 
-1. Sign up at [neon.tech](https://neon.tech) and create a new project.
-2. Copy the connection string it gives you (format:
-   `postgresql://user:password@host/dbname?sslmode=require`).
-3. Paste it into `.env` as `DATABASE_URL`.
+- Tables: `assets`, `daily_prices`, `hourly_prices` (unique per asset and timestamp), `transactions`.
+- The seed list is in [src/trade_tools/market_data/initial_universe.py](src/trade_tools/market_data/initial_universe.py).
+  The strategy only considers funds listed in `config/universe.csv`; add a fund to both
+  (`trade-tools asset add` then a CSV row) to make it a candidate.
+- Prices are converted to EUR with Yahoo FX rates (EURUSD, GBPUSD, JPY, CHF; pence → pounds).
+- A fund whose price jumps more than 3× in one day has its earlier history dropped
+  (vendor data on a different scale); this is listed in the backtest summary.
 
-Any standard PostgreSQL provider works the same way (Supabase, Railway, RDS,
-DigitalOcean Managed Databases, etc.) — just set `DATABASE_URL` accordingly.
+## Scheduled workflows (GitHub Actions)
 
----
+Add the repository secret `DATABASE_URL` (Settings → Secrets and variables → Actions).
 
----
+| Workflow | When | What |
+|---|---|---|
+| `daily_ingestion.yml` | daily 06:00 UTC | `ingest` |
+| `monthly_decision.yml` | 1st–3rd, 08:00 UTC | `refresh-adjusted-history`, `decide`; report uploaded as artifact |
+| `monitoring_refresh.yml` | daily 09:00 UTC | `dashboard`; HTML uploaded as artifact |
+| `backtest.yml` | manual | `backtest`; report uploaded as artifact |
 
-## 6. Database Initialization
+Scheduled workflows in public repositories are disabled after 60 days without activity.
 
-Run the database initialization command to create tables and seed the default asset universe:
+## Hosted dashboard
 
-```bash
-poetry run trade-tools init-db
-```
-
-Alternatively, run as a python module:
-
-```bash
-poetry run python -m trade_tools.jobs.init_db
-```
-
----
-
-## 7. Initial Asset Universe
-
-The database seed universe currently contains 99 assets (the original 45 plus
-54 additional European UCITS ETF/ETC listings):
-- **Equities**: AAPL, MSFT, NVDA, AMZN, GOOGL, META, BRK-B, JPM, JNJ, XOM, SAP.DE, ASML.AS, NESN.SW
-- **ETFs**: SPY, QQQ, VTI, VT, VXUS, EFA, EEM, IWM, AGG, BND, VWCE.DE, EUNL.DE, IUSQ.DE, SPYI.DE, SXR8.DE, VUAA.DE, SXRV.DE, EQQB.DE, IS3N.DE, VFEA.DE, EXSA.DE, EXS1.DE, IQQJ.DE, EUNK.DE, IUSN.DE, ZPRS.DE, CUSS.L, QDVE.DE, EXV3.DE, WITS.L, QDVG.DE, EXV4.DE, QDVH.DE, EXV1.DE, QDVF.DE, IQQH.DE, 2B7D.DE, VAPX.L, EUNJ.DE, ICGA.DE, ASHR.L, 36BZ.DE, KWBE.DE, VAGF.DE, IS00.MU, IUST.DE, IUS5.DE, IS04.DE, IBCD.DE, EUN5.DE, IUS7.DE, 36BD.DE, VWCG.DE
-- **REITs**: VNQ, O, PLD, AMT, IQQ6.DE
-- **Fixed Income Proxies**: ^TNX, ^FVX, ^IRX
-- **Commodities / ETCs**: GLD, SLV, DBC, PPFB.DE, COPA.L, CRUD.MI, NGAS.L, CORN.L, WEAT.L, SOYB.MI, ETL2.DE, AGAP.L, INDU.L
-- **Crypto**: BTC-USD, ETH-USD
-- **Indices**: ^GSPC, ^IXIC, ^STOXX50E, ^GDAXI, ^FTSE, ^N225
-- **FX**: EURUSD=X, GBPUSD=X, JPY=X, CHF=X
-
-The requested iShares MSCI AC Asia ex Japan and Xtrackers MSCI AC Asia ex Japan
-products are not seeded yet: the exact Yahoo result for the former is
-non-UCITS, while the supported Xetra listing for the latter is ESG-screened.
-They are withheld pending confirmation of the intended ISIN/share class.
-Also withheld (no clean UCITS match on Yahoo): iShares Physical Aluminium ETC,
-Vanguard S&P 500 Value/Growth UCITS, iShares MSCI EAFE UCITS, Invesco Euro
-Convertible Bond, iShares Euro High Yield, iShares MSCI USA Small Cap ESG
-Enhanced, L&G Russell 2000 US Small Cap, BNP Paribas Easy EPRA Developed Europe.
-
----
-
-## 8. Adding, Deactivating, and Reactivating Assets
-
-Manage assets using the CLI:
-
-### List Assets
-```bash
-poetry run trade-tools asset list
-```
-
-### Add a New Asset
-```bash
-poetry run trade-tools asset add --ticker TSLA --type equity
-```
-
-### Deactivate an Asset
-Deactivating an asset stops regular ingestion while retaining historical prices for backtesting:
-```bash
-poetry run trade-tools asset deactivate --ticker AAPL
-```
-
-### Reactivate an Asset
-```bash
-poetry run trade-tools asset reactivate --ticker AAPL
-```
-
----
-
-## 9. Running Ingestion Manually
-
-Run manual ingestion for active assets:
-
-```bash
-# Ingest both daily and hourly data
-poetry run trade-tools ingest
-
-# Ingest daily data only
-poetry run trade-tools ingest --no-hourly
-
-# Backfill only selected active assets
-poetry run trade-tools backfill --ticker VWCE.DE --ticker EUNL.DE
-```
-
----
-
-## 10. Daily Job Execution
-
-The scheduling mechanism is external to the ingestion logic, so it can run via
-cron, a CI/CD scheduler, or any other trigger. This project ships with a
-**GitHub Actions workflow** ([.github/workflows/daily_ingestion.yml](./.github/workflows/daily_ingestion.yml))
-that runs daily and does not require your own computer to be on:
-
-1. Push this repository to GitHub.
-2. In the GitHub repo, go to **Settings → Secrets and variables → Actions →
-   New repository secret**, and add:
-   - Name: `DATABASE_URL`
-   - Value: your cloud PostgreSQL connection string (same as in your local `.env`)
-3. The workflow runs automatically every day at 06:00 UTC. You can also trigger
-   it manually from the **Actions** tab → *Daily Market Data Ingestion* →
-   **Run workflow**.
-
-Alternatively, to run on your own always-on machine/server via cron:
-
-```bash
-# Example crontab entry running daily at 01:00 UTC
-0 1 * * * cd /path/to/trade-tools && /usr/local/bin/poetry run python -m trade_tools.jobs.ingest_market_data >> /var/log/trade_tools.log 2>&1
-```
-
-Note: a cron job on your own laptop only runs while that machine is powered on,
-awake, and network-connected — it will not run while the computer is off or
-asleep. GitHub Actions runs independently of your machine.
-
----
-
-## 11. Research and Operations (Versions 1a–1b)
-
-Version 1a's signals/backtests consume existing daily prices without persistence.
-Version 1b adds transaction-derived actual holdings, immutable monthly decision
-snapshots, risk assessments, and a local static monitoring report using additive
-tables. No broker connection or order execution is included.
-See the [research-core guide](./docs/research_core.md) for architecture, the
-full proposed 99-asset classification table, price and currency conventions,
-eligibility, strategy, risk checks, bias disclosures, and limitations.
-See the [Version 1b delivery report](./docs/version_1b_delivery.md) for the
-ledger rules, operating checklist, risk conventions, and monitoring dashboard.
-
-```bash
-# Refresh Yahoo's adjusted history through the existing ingestion pipeline
-poetry run trade-tools refresh-adjusted-history
-
-# Point-in-time signals and read-only portfolio targets
-poetry run trade-tools strategy signals --date 2025-12-31 --output signals.csv
-poetry run trade-tools portfolio target --date 2025-12-31 --capital 10000
-poetry run trade-tools strategy monthly-report
-
-# Actual ledger; fees and FX are entered in the transaction's native currency
-poetry run trade-tools transaction record --type deposit --date 2026-01-02 --quantity 10000
-poetry run trade-tools transaction record --type buy --date 2026-01-05 --ticker VWCE.DE --quantity 10 --price 120 --fees 2
-poetry run trade-tools transaction list
-poetry run trade-tools transaction reverse 12
-poetry run trade-tools transaction import-csv transactions.csv
-poetry run trade-tools portfolio actual
-
-# Persist the monthly decision; modelled fills are recorded in the ledger (--no-auto-record to skip)
-poetry run trade-tools operations monthly-decision --new-contribution 500
-poetry run trade-tools operations monthly-decision --date 2025-12-31 --regenerate
-poetry run trade-tools operations show-decision 1
-poetry run trade-tools operations monitor-refresh
-
-# Monthly simulation and ablation comparison
-poetry run trade-tools backtest run --universe-mode tradable
-poetry run trade-tools backtest run --universe-mode research --ablation-off --include-holdout
-poetry run trade-tools backtest compare <run_id> <run_id>
-```
-
-Default research and risk parameters are in
-[`config/research.json`](./config/research.json). `monthly_decision.yml` runs at
-08:00 UTC on days 1–3, after daily ingestion at 06:00 UTC, persists one
-idempotent decision and uploads its report. `monitoring_refresh.yml` runs
-daily at 09:00 UTC and uploads a static HTML dashboard; `backtest.yml` is
-manual-only. A separately deployable, authenticated web dashboard is described
-below. GitHub Actions cron timing can be delayed, and scheduled workflows
-in public repositories can be disabled after 60 days without repository
-activity. Workflows read `DATABASE_URL` only from the Actions secret. Signals
-and backtests are read-only; `operations monthly-decision` persists snapshots,
-and transaction commands persist actual ledger entries. Full adjusted-history
-refresh remains an explicit operation through the existing ingestion path.
-
-### Continuously hosted dashboard
-
-The web dashboard runs as a long-lived Flask/Gunicorn service in the supplied
-Docker image. It refreshes its data on each page load and automatically reloads
-the page every five minutes. It is separate from the weekly GitHub Actions
-static-report workflow.
-
-Deploy the repository's `Dockerfile` to a container host that supports a
-persistent disk. Configure these environment variables in the host's secret
-manager:
-
-- `DATABASE_URL` — the PostgreSQL connection string.
-- `DASHBOARD_USERNAME` — the dashboard's HTTP Basic Auth username.
-- `DASHBOARD_PASSWORD` — a unique password of at least 16 characters.
-
-The service listens on the host-provided `PORT` (default `8080`) and exposes
-`/healthz` for health checks. Monthly targets and proposed trades come from
-database snapshots. Backtest panels read local `reports/backtests` files, so
-they remain empty until backtest reports are generated on the host. A persistent
-disk at `/app/reports` preserves those reports across restarts. Configure the
-host's TLS/HTTPS endpoint and keep the service private or behind its
-authentication. Do not expose credentials in source control or logs.
-
-For a local container smoke run, first set the three environment variables in
-your shell, then run:
+The [Dockerfile](Dockerfile) runs the dashboard as a Gunicorn web service that rebuilds
+the page on every request and refreshes every 5 minutes. Set `DATABASE_URL`,
+`DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` (≥ 16 characters) in the host's secret
+manager; it listens on `PORT` (8080) and exposes `/healthz`. Serve it over HTTPS only
+(it uses HTTP Basic Auth). The "Target" column appears when the host has a saved
+decision in `reports/decisions/`.
 
 ```bash
 docker build -t trade-tools-dashboard .
-docker run --detach --name trade-tools-dashboard --restart unless-stopped \
-  --publish 8080:8080 --env DATABASE_URL --env DASHBOARD_USERNAME \
-  --env DASHBOARD_PASSWORD --volume trade-tools-reports:/app/reports \
-  trade-tools-dashboard
+docker run -d --name trade-tools-dashboard -p 8080:8080 \
+  --env DATABASE_URL --env DASHBOARD_USERNAME --env DASHBOARD_PASSWORD trade-tools-dashboard
 ```
-
-Open `http://localhost:8080` and authenticate. On a public host, use its HTTPS
-URL; HTTP Basic Auth must not be used over an unencrypted public connection.
-
----
-
-## 12. Basic Troubleshooting
-
-1. **Database Connection Errors**:
-   Verify `DATABASE_URL` is set correctly and that your cloud PostgreSQL
-   provider (e.g. Neon) shows the database as active/reachable in its dashboard.
-2. **GitHub Actions failures**:
-   Check the **Actions** tab in GitHub for the failed run's logs. The most
-   common cause is a missing or incorrect `DATABASE_URL` repository secret.
-3. **Missing Price Data**:
-   Yahoo Finance may return empty results for invalid or delisted tickers. Check logs for warnings.
-4. **Running Tests**:
-   Run unit tests locally (all Yahoo Finance calls are mocked in tests, no live DB required):
-   ```bash
-   poetry run pytest
-   ```
-
-> Style-box and bond-matrix classifications are maintained manually in
-> `src/trade_tools/market_data/classification.py` and applied to the DB on every
-> `init-db`/`ingest` run. Unlisted tickers default to `N/A`.

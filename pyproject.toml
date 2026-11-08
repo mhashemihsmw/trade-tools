@@ -21,6 +21,8 @@ dependencies = [
     "matplotlib (>=3.11.2,<4.0.0)",
     "flask (>=3,<4)",
     "gunicorn (>=23,<24)",
+    "pytest (>=9.2.0,<10.0.0)",
+    "dotenv (>=0.9.9,<0.10.0)",
 ]
 
 [tool.poetry.group.dev.dependencies]

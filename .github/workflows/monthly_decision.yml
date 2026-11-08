@@ -10,14 +10,9 @@ on:
         required: false
         type: string
       new_contribution:
-        description: "Optional new EUR contribution to include in recommended capital"
+        description: "Optional new EUR contribution to include in suggested trades"
         required: false
         type: string
-      regenerate:
-        description: "Supersede the prior saved decision and create a new generation"
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   decision:
@@ -38,23 +33,27 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      - name: Create and persist monthly decision
+      - name: Refresh adjusted price history
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: poetry run trade-tools refresh-adjusted-history
+
+      - name: Compute monthly decision
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DECISION_DATE: ${{ inputs.decision_date }}
           NEW_CONTRIBUTION: ${{ inputs.new_contribution }}
-          REGENERATE: ${{ inputs.regenerate }}
         run: |
+          set -o pipefail
           args=()
           if [ -n "$DECISION_DATE" ]; then args+=(--date "$DECISION_DATE"); fi
-          if [ -n "$NEW_CONTRIBUTION" ]; then args+=(--new-contribution "$NEW_CONTRIBUTION"); fi
-          if [ "$REGENERATE" = "true" ]; then args+=(--regenerate); fi
-          poetry run trade-tools operations monthly-decision "${args[@]}"
+          if [ -n "$NEW_CONTRIBUTION" ]; then args+=(--contribution "$NEW_CONTRIBUTION"); fi
+          poetry run trade-tools decide "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload decision report
         uses: actions/upload-artifact@v4
         with:
           name: monthly-decision-${{ github.run_id }}
-          path: reports/monthly_decisions/
+          path: reports/decisions/
           if-no-files-found: error
           retention-days: 90

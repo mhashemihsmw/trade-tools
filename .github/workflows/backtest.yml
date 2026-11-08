@@ -11,19 +11,6 @@ on:
         description: "Last decision date (YYYY-MM-DD)"
         required: false
         type: string
-      universe_mode:
-        description: "Universe eligibility mode"
-        required: true
-        default: "tradable"
-        type: choice
-        options:
-          - tradable
-          - research
-      include_holdout:
-        description: "Include holdout results in the report"
-        required: true
-        default: false
-        type: boolean
 
 jobs:
   backtest:
@@ -49,14 +36,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           START_DATE: ${{ inputs.start }}
           END_DATE: ${{ inputs.end }}
-          UNIVERSE_MODE: ${{ inputs.universe_mode }}
-          INCLUDE_HOLDOUT: ${{ inputs.include_holdout }}
         run: |
-          args=(--universe-mode "$UNIVERSE_MODE")
+          set -o pipefail
+          args=()
           if [ -n "$START_DATE" ]; then args+=(--start "$START_DATE"); fi
           if [ -n "$END_DATE" ]; then args+=(--end "$END_DATE"); fi
-          if [ "$INCLUDE_HOLDOUT" = "true" ]; then args+=(--include-holdout); fi
-          poetry run trade-tools backtest run "${args[@]}"
+          poetry run trade-tools backtest "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload backtest run directory
         uses: actions/upload-artifact@v4

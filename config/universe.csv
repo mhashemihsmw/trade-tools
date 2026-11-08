@@ -1,0 +1,69 @@
+ticker,group,tradable,preferred,note
+AGAP.L,agriculture,true,false,WisdomTree (Broad) Agriculture
+EUNJ.DE,asia_pacific_ex_japan,true,false,iShares MSCI Pacific ex Japan
+VAPX.L,asia_pacific_ex_japan,true,false,Vanguard FTSE Asia Pacific ex Japan
+DBC,broad_commodities,false,false,
+36BZ.DE,china_equity,true,false,iShares MSCI China A; accumulating (classification uncertain)
+ASHR.L,china_equity,true,false,Xtrackers Harvest CSI 300 China A-Shares (classification uncertain)
+ICGA.DE,china_equity,true,false,iShares MSCI China; accumulating
+KWBE.DE,china_equity,true,false,KraneShares CSI China Internet (classification uncertain)
+COPA.L,copper,true,false,WisdomTree Copper
+CORN.L,corn,true,false,WisdomTree Corn
+CRUD.MI,crude_oil,true,false,WisdomTree WTI Crude Oil
+EFA,developed_ex_us,false,false,
+VXUS,developed_ex_us,false,false,
+EUNL.DE,developed_world,true,false,iShares Core MSCI World; accumulating
+36BD.DE,development_bank_bonds,true,false,iShares $ Development Bank Bonds; accumulating
+IUS7.DE,em_bonds_usd,true,false,iShares J.P. Morgan $ EM Bond
+EEM,emerging_markets,false,false,
+IS3N.DE,emerging_markets,true,true,iShares Core MSCI EM IMI; accumulating
+VFEA.DE,emerging_markets,true,false,Vanguard FTSE Emerging Markets; accumulating
+EUN5.DE,euro_corporate_bonds,true,false,iShares Core EUR Corp Bond
+EXV1.DE,europe_banks,true,false,iShares STOXX Europe 600 Banks
+EUNK.DE,europe_equity,true,false,iShares MSCI Europe; accumulating
+VWCG.DE,europe_equity,true,false,Vanguard FTSE Developed Europe; accumulating
+EXSA.DE,europe_equity_600,true,false,iShares Core STOXX Europe 600
+EXV4.DE,europe_healthcare,true,false,iShares STOXX Europe 600 Health Care
+EXV3.DE,europe_information_technology,true,false,iShares STOXX Europe 600 Technology
+EXS1.DE,germany_equity,true,false,iShares Core DAX
+VAGF.DE,global_aggregate_bonds_eur_hedged,true,true,Vanguard Global Aggregate Bond; EUR-hedged
+IQQH.DE,global_clean_energy,true,false,iShares Global Clean Energy (classification uncertain)
+IUSQ.DE,global_equity_all_world,true,false,iShares MSCI ACWI; accumulating
+SPYI.DE,global_equity_all_world,true,false,SPDR MSCI ACWI IMI; accumulating
+VT,global_equity_all_world,false,false,
+VWCE.DE,global_equity_all_world,true,true,Vanguard FTSE All-World; accumulating
+IUS5.DE,global_inflation_linked_bonds,true,false,iShares Global Inflation Linked Govt Bond; accumulating
+WITS.L,global_information_technology,true,false,iShares MSCI World Information Technology
+IQQ6.DE,global_property,true,true,iShares Developed Markets Property Yield
+GLD,gold,false,false,
+PPFB.DE,gold,true,false,iShares Physical Gold ETC
+INDU.L,industrial_metals,true,false,WisdomTree Industrial Metals
+IQQJ.DE,japan_equity,true,false,iShares MSCI Japan (distributing share class)
+ETL2.DE,long_commodities,true,false,L&G Longer Dated All Commodities
+IS04.DE,long_us_treasuries,true,false,iShares $ Treasury Bond 20+yr
+EQQB.DE,nasdaq100,true,false,Invesco NASDAQ-100; accumulating
+QQQ,nasdaq100,false,false,
+SXRV.DE,nasdaq100,true,true,iShares NASDAQ 100; accumulating
+NGAS.L,natural_gas,true,false,WisdomTree Natural Gas
+SLV,silver,false,false,
+SOYB.MI,soybeans,true,false,WisdomTree Soybeans
+SPY,sp500,false,false,
+SXR8.DE,sp500,true,true,iShares Core S&P 500; accumulating
+VUAA.DE,sp500,true,false,Vanguard S&P 500; accumulating
+AGG,us_aggregate_bonds,false,false,
+BND,us_aggregate_bonds,false,false,
+2B7D.DE,us_consumer_staples,true,false,iShares S&P 500 Consumer Staples
+IBCD.DE,us_corporate_bonds,true,false,iShares $ Corp Bond
+QDVF.DE,us_energy,true,false,iShares S&P 500 Energy
+QDVH.DE,us_financials,true,false,iShares S&P 500 Financials
+QDVG.DE,us_healthcare,true,false,iShares S&P 500 Health Care
+IS00.MU,us_high_yield_bonds,true,false,iShares $ High Yield Corp Bond (Munich only)
+QDVE.DE,us_information_technology,true,false,iShares S&P 500 Information Technology
+VNQ,us_property_reit,false,false,
+CUSS.L,us_small_cap,true,false,iShares MSCI USA Small Cap
+IWM,us_small_cap,false,false,
+IUST.DE,us_tips,true,false,iShares $ TIPS; accumulating
+VTI,us_total_market,false,false,
+WEAT.L,wheat,true,false,WisdomTree Wheat
+IUSN.DE,world_small_cap,true,false,iShares MSCI World Small Cap; accumulating
+ZPRS.DE,world_small_cap,true,false,SPDR MSCI World Small Cap

@@ -1,62 +1,39 @@
+"""Command-line interface. Each command is a thin wrapper around one module.
+
+Data:       init-db, ingest, backfill, refresh-adjusted-history, asset ...
+Strategy:   decide, backtest
+Portfolio:  tx add/list/reverse/import, portfolio, dashboard
+"""
+
 import logging
-import json
-import hashlib
-import html
-import click
-import numpy as np
-import pandas as pd
-from sqlalchemy import select
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+import click
+import pandas as pd
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from trade_tools.db import init_db, get_session
-from trade_tools.db.models import (
-    Asset, DecisionItem, DecisionTrade, RiskAssessment, StrategyDecision, Transaction,
-    VALID_ASSET_TYPES,
-)
+from trade_tools.db import get_session, init_db
+from trade_tools.db.models import Asset, VALID_ASSET_TYPES
 from trade_tools.jobs.init_db import run_init_db
 from trade_tools.market_data.ingestion import MarketDataIngestion
-from trade_tools.market_data.research_prices import load_research_prices
-from trade_tools.market_data.research_universe import classification_for
-from trade_tools.portfolio.construction import construct_target_weights, target_values
-from trade_tools.portfolio.operations import (
-    TradeProposalConfig,
-    derive_portfolio,
-    portfolio_nav_history,
-    propose_trades,
-    record_decision_transactions,
-    record_transaction,
-    reverse_decision_transactions,
-    reverse_transaction,
-    time_weighted_returns,
-)
-from trade_tools.portfolio.risk import historical_var_cvar, validate_target_weights, RiskLimits
-from trade_tools.research_config import load_research_config
-from trade_tools.strategies.adaptive_momentum import AdaptiveMomentumStrategy, StrategyConfig
-from trade_tools.strategies.backtest import (
-    BacktestConfig,
-    monthly_decision_dates,
-    run_backtest,
-    write_backtest_report,
-)
-from trade_tools.features.research import aligned_daily_returns, feature_frame, sample_covariance
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+settings_option = click.option(
+    "--settings", "settings_path", default="config/strategy.toml", show_default=True,
+    type=click.Path(exists=True, dir_okay=False), help="Strategy settings file.",
+)
 
-# Register the command-line interface.
+
 @click.group()
 def main():
-    """Trade Tools CLI - Market Data, Strategy & Portfolio Management."""
-    pass
+    """Trade Tools: market data, monthly strategy decisions and portfolio tracking."""
 
+
+# --- data (unchanged) ----------------------------------------------------------------
 
 @main.command("init-db")
 def init_db_cmd():
@@ -194,976 +171,193 @@ def reactivate_asset_cmd(ticker: str):
         click.echo(f"Asset {ticker} reactivated.")
 
 
-def _read_research_state(config_path: str, decision_date: str | None = None):
-    backtest_config, strategy_config, portfolio_config = load_research_config(config_path)
-    if strategy_config.universe_mode != backtest_config.universe_mode:
-        strategy_config = replace(strategy_config, universe_mode=backtest_config.universe_mode)
+# --- strategy ------------------------------------------------------------------------
+
+def _load(settings_path: str):
+    from trade_tools.prices import load_prices
+    from trade_tools.settings import load_settings, load_universe
+
+    settings = load_settings(settings_path)
+    universe = load_universe()
+    init_db()
     with get_session() as session:
-        prices, metadata = load_research_prices(
-            session,
-            base_currency=backtest_config.base_currency,
+        prices = load_prices(session)
+    return settings, universe, prices
+
+
+@main.command("decide")
+@click.option("--date", "as_of", help="Decide as of this date (YYYY-MM-DD). Default: end of last month.")
+@click.option("--contribution", type=click.FloatRange(min=0), default=0.0, show_default=True,
+              help="New money (EUR) to invest this month, included in suggested trades.")
+@click.option("--output-dir", default="reports/decisions", show_default=True,
+              type=click.Path(file_okay=False, path_type=Path))
+@settings_option
+def decide(as_of: str | None, contribution: float, output_dir: Path, settings_path: str):
+    """Compute this month's target weights and suggested trades (nothing is executed)."""
+    from trade_tools.decision import make_decision, save_decision, suggest_trades
+    from trade_tools.ledger import holdings, load_transactions, portfolio_history
+
+    settings, universe, prices = _load(settings_path)
+    today = pd.Timestamp.now().normalize()
+    as_of_date = pd.Timestamp(as_of) if as_of else today.replace(day=1) - pd.Timedelta(days=1)
+    decision = make_decision(prices, universe, settings, as_of_date)
+    if (as_of_date - decision.date).days > 7:
+        raise click.ClickException(
+            f"Latest fund prices are from {decision.date.date()}; run `trade-tools ingest` first."
         )
-    dates = monthly_decision_dates(prices)
-    if not dates:
-        raise click.ClickException("No daily market data is available for research.")
-    if decision_date:
-        requested = pd.Timestamp(decision_date)
-        if requested.tzinfo is None:
-            requested = requested.tz_localize("UTC")
-        eligible_dates = [value for value in dates if value <= requested]
-        if not eligible_dates:
-            raise click.ClickException("No market data exists on or before the requested decision date.")
-        decision = eligible_dates[-1]
-    else:
-        decision = dates[-1]
-    observations: dict[str, pd.Series] = {}
-    features: list[pd.Series] = []
-    latest: dict[str, pd.Timestamp] = {}
-    counts: dict[str, int] = {}
-    for ticker, frame in prices.items():
-        series = pd.to_numeric(frame.get("adjusted_close"), errors="coerce").dropna()
-        observations[ticker] = series
-        point = feature_frame(
-            series,
-            volatility_window=strategy_config.volatility_window,
-            trend_months=strategy_config.trend_months,
-            trend_days=strategy_config.trend_days,
-        ).loc[lambda values: values.index <= decision]
-        point_series = series.loc[series.index <= decision]
-        if not point.empty:
-            row = point.iloc[-1].copy()
-            row["ticker"] = ticker
-            features.append(row)
-            if not point_series.empty:
-                latest[ticker] = point_series.index[-1]
-            counts[ticker] = int(len(point_series))
-    features_at_date = (
-        pd.DataFrame(features).set_index("ticker", drop=False) if features else pd.DataFrame()
-    )
-    strategy = AdaptiveMomentumStrategy(strategy_config)
-    ranked = strategy.rank(
-        features_at_date,
-        metadata,
-        decision,
-        latest_observations=latest,
-        history_counts=counts,
-    )
-    if not ranked.empty:
-        ranked["universe_mode"] = strategy_config.universe_mode
-    return (
-        decision,
-        ranked,
-        observations,
-        metadata,
-        backtest_config,
-        strategy_config,
-        portfolio_config,
-        prices,
-    )
+
+    with get_session() as session:
+        transactions = load_transactions(session)
+    latest = prices.close.ffill().iloc[-1]
+    current = holdings(transactions, latest)["units"]
+    history = portfolio_history(transactions, prices.close)
+    cash = float(history["cash_eur"].iloc[-1]) if not history.empty else 0.0
+    trades = suggest_trades(decision.weights, current, cash, latest, settings, contribution)
+
+    folder = save_decision(decision, trades, output_dir / str(decision.date.date()))
+    click.echo((folder / "summary.md").read_text())
+    click.echo(f"Saved to {folder}/")
 
 
-def _has_stale_tradable_fund(ranked: pd.DataFrame) -> bool:
-    if ranked.empty:
-        return False
-    tradable_fund_tickers = []
-    for ticker in ranked["ticker"]:
-        classification = classification_for(ticker)
-        if classification is not None and classification.is_fund and classification.tradable:
-            tradable_fund_tickers.append(ticker)
-    return ranked.loc[
-        ranked["ticker"].isin(tradable_fund_tickers), "exclusion_reason"
-    ].eq("stale_data").any()
+@main.command("backtest")
+@click.option("--start", help="First decision date (YYYY-MM-DD); overrides the settings file.")
+@click.option("--end", help="Last decision date (YYYY-MM-DD); overrides the settings file.")
+@click.option("--output-dir", default="reports/backtests", show_default=True,
+              type=click.Path(file_okay=False, path_type=Path))
+@settings_option
+def backtest(start: str | None, end: str | None, output_dir: Path, settings_path: str):
+    """Run the monthly decision over history and compare with equal-weight and benchmark."""
+    from dataclasses import replace
 
+    from trade_tools.backtest import run_backtest, save_backtest
 
-def _risk_limits(config: Any) -> RiskLimits:
-    return RiskLimits(
-        max_asset_weight=config.max_asset_weight,
-        max_exposure_group_weight=config.max_exposure_group_weight,
-        volatility_target=config.volatility_target,
-        volatility_window=config.covariance_window,
-        var_confidence=config.var_confidence,
-        var_horizons=config.var_horizons,
-        var_lookback=config.var_lookback,
-        max_var_1d=config.max_var_1d,
-        max_cvar_21d=config.max_cvar_21d,
-        max_stress_loss=config.max_stress_loss,
-    )
-
-
-def _actual_risk_positions(
-    portfolio: dict[str, Any],
-    metadata: dict[str, dict[str, Any]],
-) -> pd.DataFrame:
-    holdings = portfolio["holdings"].copy()
-    if holdings.empty:
-        return pd.DataFrame(columns=["ticker", "weight", "exposure_group", "type", "country", "sector"])
-    holdings["weight"] = holdings["market_value_eur"] / portfolio["portfolio_value_eur"]
-    for field in ("type", "country", "sector"):
-        holdings[field] = holdings["ticker"].map(lambda ticker: metadata.get(ticker, {}).get(field))
-    holdings["exposure_group"] = holdings["ticker"].map(
-        lambda ticker: getattr(classification_for(ticker), "exposure_group", ticker)
-    )
-    return holdings[["ticker", "weight", "exposure_group", "type", "country", "sector"]]
-
-
-@main.group("strategy")
-def strategy_group():
-    """Run point-in-time strategy research and signals."""
-
-
-@strategy_group.command("signals")
-@click.option("--date", "decision_date", help="Decision date (YYYY-MM-DD); defaults to latest month end.")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--output", type=click.Path(dir_okay=False), help="Optional CSV path for rankings and exclusions.")
-@click.option("--fail-on-stale/--allow-stale", default=False, help="Exit non-zero when any asset's data is stale.")
-def strategy_signals(decision_date: str | None, config_path: str, output: str | None, fail_on_stale: bool):
-    """Print scores, selections, exclusions and point-in-time data status."""
+    settings, universe, prices = _load(settings_path)
+    settings = replace(settings, start=start or settings.start, end=end or settings.end)
     try:
-        decision, ranked, *_ = _read_research_state(config_path, decision_date)
+        result = run_backtest(prices, universe, settings)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    stale = _has_stale_tradable_fund(ranked)
-    click.echo(f"Decision date: {decision.date()} | universe mode: {ranked['universe_mode'].iloc[0] if not ranked.empty else 'unknown'}")
-    click.echo(ranked.to_string(index=False, na_rep=""))
-    if output:
-        target = Path(output)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        ranked.to_csv(target, index=False)
-        click.echo(f"CSV report: {target}")
-    if fail_on_stale and stale:
-        raise click.ClickException("Stale market data was found; refresh data before publishing signals.")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    folder = save_backtest(result, output_dir / stamp)
+    click.echo((folder / "summary.md").read_text())
+    click.echo(f"Saved to {folder}/")
 
 
-@strategy_group.command("monthly-report")
-@click.option("--date", "decision_date", help="Decision date (YYYY-MM-DD); defaults to last completed month end.")
-@click.option("--capital", type=click.FloatRange(min=0, min_open=True), help="Total portfolio capital in the configured base currency.")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--reports-dir", default="reports/monthly_signals", show_default=True, type=click.Path(file_okay=False))
-@click.option("--force", is_flag=True, help="Recreate a report already present for this date/configuration.")
-def monthly_signals_report(
-    decision_date: str | None,
-    capital: float | None,
-    config_path: str,
-    reports_dir: str,
-    force: bool,
-):
-    """Create an idempotent month-end signals, exclusions, targets and risk report."""
-    try:
-        backtest, strategy_config, portfolio_config = load_research_config(config_path)
-        if decision_date is None:
-            previous_month_end = pd.Timestamp.now(tz="UTC").to_period("M").start_time.tz_localize("UTC") - pd.Timedelta(days=1)
-            decision_date = previous_month_end.date().isoformat()
-        decision, ranked, observations, _, _, strategy_config, portfolio_config, _ = _read_research_state(
-            config_path, decision_date
-        )
-        report_config = json.dumps(
-            {
-                "strategy": strategy_config.__dict__,
-                "portfolio": portfolio_config.__dict__,
-                "backtest": backtest.__dict__,
-                "capital": capital if capital is not None else backtest.backtest_capital,
-            },
-            sort_keys=True,
-        )
-        report_hash = hashlib.sha256(report_config.encode()).hexdigest()[:16]
-        report_id = f"{decision.date()}-{report_hash}"
-        report_dir = Path(reports_dir) / report_id
-        if report_dir.exists() and not force:
-            click.echo(f"Report already exists for {decision.date()} and configuration {strategy_config.config_hash}; skipped.")
-            click.echo(f"Existing report: {report_dir}")
-            return
-        if _has_stale_tradable_fund(ranked):
-            raise click.ClickException("Stale tradable-universe data detected; refresh data before publishing signals.")
-        final_capital = capital if capital is not None else backtest.backtest_capital
-        selected = ranked.loc[ranked["selected"]]
-        historical_prices = {
-            ticker: series.loc[series.index <= decision]
-            for ticker, series in observations.items()
-        }
-        returns = aligned_daily_returns(pd.DataFrame(historical_prices))
-        covariance = sample_covariance(
-            pd.DataFrame(historical_prices).tail(portfolio_config.covariance_window + 1),
-            window=portfolio_config.covariance_window,
-        )
-        targets = construct_target_weights(selected, portfolio_config, covariance)
-        targets = target_values(targets, final_capital)
-        risk = validate_target_weights(
-            targets,
-            _risk_limits(portfolio_config),
-            asset_returns=returns,
-            asset_prices=pd.DataFrame(historical_prices),
-            stress_scenarios=portfolio_config.stress_scenarios,
-        )
-        report_dir.mkdir(parents=True, exist_ok=True)
-        ranked.to_csv(report_dir / "rankings_and_exclusions.csv", index=False)
-        targets.to_csv(report_dir / "target_weights.csv", index=False)
-        (report_dir / "risk_validation.json").write_text(
-            json.dumps(_json_safe(risk), indent=2, allow_nan=False) + "\n"
-        )
-        status = {
-            "decision_date": decision.date().isoformat(),
-            "universe_mode": strategy_config.universe_mode,
-            "configuration_hash": report_hash,
-            "data_freshness": "fresh",
-            "capital": final_capital,
-            "base_currency": backtest.base_currency,
-        }
-        (report_dir / "status.json").write_text(json.dumps(status, indent=2) + "\n")
-        click.echo(f"Monthly signals report: {report_dir}")
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+# --- portfolio -----------------------------------------------------------------------
+
+@main.group("tx")
+def tx_group():
+    """Record your real trades and cash movements."""
 
 
-@main.group("portfolio")
-def portfolio_group():
-    """Construct and validate portfolio targets."""
-
-
-@portfolio_group.command("target")
-@click.option("--date", "decision_date", help="Decision date (YYYY-MM-DD); defaults to latest month end.")
-@click.option("--capital", type=click.FloatRange(min=0, min_open=True), required=True, help="Total portfolio capital in the configured base currency.")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--output", type=click.Path(dir_okay=False), help="Optional CSV path for target weights.")
-def portfolio_target(decision_date: str | None, capital: float, config_path: str, output: str | None):
-    """Print target weights, base-currency values and independent risk validation."""
-    try:
-        decision, ranked, observations, metadata, _, strategy_config, portfolio_config, _ = _read_research_state(
-            config_path, decision_date
-        )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    selected = ranked.loc[ranked["selected"]]
-    historical_prices = {
-        ticker: series.loc[series.index <= decision]
-        for ticker, series in observations.items()
-    }
-    returns = aligned_daily_returns(pd.DataFrame(historical_prices))
-    covariance = sample_covariance(
-        pd.DataFrame({
-            ticker: series
-            for ticker, series in historical_prices.items()
-        }).tail(portfolio_config.covariance_window + 1),
-        window=portfolio_config.covariance_window,
-    )
-    targets = construct_target_weights(selected, portfolio_config, covariance)
-    if not targets.empty:
-        targets = target_values(targets, capital)
-    assessment = validate_target_weights(
-        targets,
-        _risk_limits(portfolio_config),
-        asset_returns=returns,
-        asset_prices=pd.DataFrame(historical_prices),
-        stress_scenarios=portfolio_config.stress_scenarios,
-    )
-    click.echo(f"Decision date: {decision.date()} | universe mode: {strategy_config.universe_mode}")
-    click.echo(f"Base currency: {load_research_config(config_path)[0].base_currency}")
-    click.echo(targets.to_string(index=False, na_rep=""))
-    click.echo(json.dumps(_json_safe(assessment), indent=2, default=str, allow_nan=False))
-    if output:
-        target = Path(output)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        targets.to_csv(target, index=False)
-        click.echo(f"CSV report: {target}")
-    if assessment["status"] != "valid":
-        raise click.ClickException("Target weights violate configured risk limits.")
-
-
-@main.group("transaction")
-def transaction_group():
-    """Record and inspect the immutable actual-portfolio ledger."""
-
-
-@transaction_group.command("record")
-@click.option("--type", "transaction_type", required=True, type=click.Choice(
-    ["buy", "sell", "deposit", "withdrawal", "fee", "dividend"]
-))
+@tx_group.command("add")
+@click.option("--type", "kind", required=True,
+              type=click.Choice(["buy", "sell", "deposit", "withdrawal", "fee", "dividend"]))
 @click.option("--date", "trade_date", required=True, type=click.DateTime(formats=["%Y-%m-%d"]))
-@click.option("--quantity", required=True, type=click.FloatRange(min=0, min_open=True))
-@click.option("--ticker", help="Required for buy/sell; omit for cash transactions.")
-@click.option("--price", type=click.FloatRange(min=0, min_open=True), help="Required for buy/sell.")
-@click.option("--fees", type=click.FloatRange(min=0), default=0.0, show_default=True)
+@click.option("--quantity", required=True, type=float, help="Units for buy/sell, amount otherwise.")
+@click.option("--ticker", help="Required for buy/sell.")
+@click.option("--price", type=float, help="Price per unit, required for buy/sell.")
+@click.option("--fees", type=float, default=0.0, show_default=True)
 @click.option("--currency", default="EUR", show_default=True)
-@click.option("--fx-to-eur", type=click.FloatRange(min=0, min_open=True), default=1.0, show_default=True)
+@click.option("--fx-to-eur", type=float, default=1.0, show_default=True,
+              help="EUR per unit of --currency on the trade date.")
 @click.option("--notes")
-@click.option("--reference")
-def transaction_record(
-    transaction_type: str, trade_date: datetime, quantity: float,
-    ticker: str | None, price: float | None, fees: float,
-    currency: str, fx_to_eur: float, notes: str | None, reference: str | None,
-):
-    """Record one actual trade or cash movement; no recommendation is executed."""
+@click.option("--reference", help="Optional unique ID, e.g. the broker's order number.")
+def tx_add(kind, trade_date, quantity, ticker, price, fees, currency, fx_to_eur, notes, reference):
+    """Add one transaction."""
+    from trade_tools.ledger import record_transaction
+
     init_db()
     try:
         with get_session() as session:
-            asset = session.scalar(select(Asset).where(Asset.ticker == ticker.upper())) if ticker else None
-            if ticker and asset is None:
-                raise ValueError(f"Unknown ticker: {ticker}")
-            entry = record_transaction(
-                session, transaction_type=transaction_type, quantity=quantity,
-                trade_date=trade_date.date(), asset_id=asset.id if asset else None,
-                execution_price=price, fees=fees, currency=currency,
+            row = record_transaction(
+                session, kind=kind, trade_date=trade_date.date(), quantity=quantity,
+                ticker=ticker, price=price, fees=fees, currency=currency,
                 fx_to_eur=fx_to_eur, notes=notes, reference=reference,
             )
-            transaction_id = entry.id
+            transaction_id = row.id
     except (ValueError, IntegrityError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Recorded transaction {transaction_id}; no orders were sent.")
+    click.echo(f"Recorded transaction {transaction_id}.")
 
 
-@transaction_group.command("list")
-@click.option("--limit", type=click.IntRange(min=1, max=1000), default=100, show_default=True)
-def transaction_list(limit: int):
-    """List the most recent ledger entries, including reversal rows."""
+@tx_group.command("list")
+@click.option("--all", "include_reversed", is_flag=True, help="Include reversed rows and reversals.")
+@click.option("--limit", type=int, default=50, show_default=True)
+def tx_list(include_reversed: bool, limit: int):
+    """Show the most recent transactions."""
+    from trade_tools.ledger import load_transactions
+
     init_db()
     with get_session() as session:
-        entries = list(session.scalars(
-            select(Transaction).order_by(Transaction.trade_date.desc(), Transaction.id.desc()).limit(limit)
-        ))
-        assets = {asset.id: asset.ticker for asset in session.scalars(select(Asset))}
-    click.echo(f"{'ID':>5} {'Date':<10} {'Type':<12} {'Ticker':<12} {'Quantity':>12} {'Price':>12} {'Fees':>10} {'FX/EUR':>10} {'Reverses':>9}")
-    for entry in entries:
-        price = f"{entry.execution_price:.4f}" if entry.execution_price is not None else "-"
-        click.echo(
-            f"{entry.id:>5} {entry.trade_date.isoformat():<10} {entry.transaction_type:<12} "
-            f"{assets.get(entry.asset_id, '-'):<12} {entry.quantity:>12.4f} {price:>12} "
-            f"{entry.fees:>10.2f} {entry.fx_to_eur:>10.5f} "
-            f"{entry.reversal_of_id if entry.reversal_of_id is not None else '-':>9}"
-        )
+        table = load_transactions(session, include_reversed=include_reversed)
+    columns = ["id", "date", "type", "ticker", "quantity", "price", "fees", "cash_flow_eur", "notes"]
+    click.echo(table[columns].tail(limit).to_string(index=False, na_rep=""))
 
 
-@transaction_group.command("reverse")
+@tx_group.command("reverse")
 @click.argument("transaction_id", type=int)
 @click.option("--notes")
-def transaction_reverse(transaction_id: int, notes: str | None):
-    """Correct an entry by appending a reversal; ledger rows are never edited."""
+def tx_reverse(transaction_id: int, notes: str | None):
+    """Cancel a transaction by adding an opposite one (the original is kept)."""
+    from trade_tools.ledger import reverse_transaction
+
     init_db()
     try:
         with get_session() as session:
-            reversal = reverse_transaction(session, transaction_id, notes=notes)
-            reversal_id = reversal.id
+            reversal_id = reverse_transaction(session, transaction_id, notes).id
     except (ValueError, IntegrityError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Created reversal transaction {reversal_id} for {transaction_id}.")
+    click.echo(f"Added reversal {reversal_id} for transaction {transaction_id}.")
 
 
-@transaction_group.command("import-csv")
+@tx_group.command("import")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-def transaction_import_csv(path: Path):
-    """Import a CSV with date,type,quantity and optional ticker/price/fees/FX fields."""
+def tx_import(path: Path):
+    """Import a CSV: date,type,quantity[,ticker,price,fees,currency,fx_to_eur,notes,reference]."""
+    from trade_tools.ledger import import_csv
+
     init_db()
-    required = {"date", "type", "quantity"}
     try:
-        frame = pd.read_csv(path)
-        rows = frame.astype(object).where(pd.notna(frame), None).to_dict("records")
-        if len(frame.columns) == 0 or not required.issubset(frame.columns):
-            raise ValueError(f"CSV must include columns: {', '.join(sorted(required))}")
         with get_session() as session:
-            assets = {asset.ticker: asset for asset in session.scalars(select(Asset))}
-            created: list[int] = []
-            for row_number, row in enumerate(rows, start=2):
-                ticker = str(row.get("ticker") or "").strip().upper()
-                asset = assets.get(ticker) if ticker else None
-                if ticker and asset is None:
-                    raise ValueError(f"Row {row_number}: unknown ticker {ticker}")
-                try:
-                    entry = record_transaction(
-                        session,
-                        transaction_type=str(row["type"]).strip(),
-                        quantity=float(row["quantity"]),
-                        trade_date=pd.Timestamp(row["date"]).date(),
-                        asset_id=asset.id if asset else None,
-                        execution_price=float(row["price"]) if row.get("price") not in (None, "") else None,
-                        fees=float(row.get("fees") or 0),
-                        currency=str(row.get("currency") or "EUR"),
-                        fx_to_eur=float(row.get("fx_to_eur") or 1.0),
-                        notes=str(row["notes"]) if row.get("notes") not in (None, "") else None,
-                        reference=str(row["reference"]) if row.get("reference") not in (None, "") else None,
-                    )
-                    created.append(entry.id)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"Row {row_number}: {exc}") from exc
+            count = import_csv(session, path)
     except (ValueError, IntegrityError) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Imported {len(created)} transactions.")
+    click.echo(f"Imported {count} transactions.")
 
 
-@portfolio_group.command("actual")
-@click.option("--as-of", "as_of_date", help="Valuation date (YYYY-MM-DD), defaults to latest stored prices.")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-def portfolio_actual(as_of_date: str | None, config_path: str):
-    """Show transaction-derived actual holdings, cash, P&L, and risk."""
-    init_db()
-    _, _, portfolio_config = load_research_config(config_path)
-    date_value = pd.Timestamp(as_of_date).date() if as_of_date else None
+@main.command("portfolio")
+@settings_option
+def portfolio(settings_path: str):
+    """Print current holdings and performance."""
+    from trade_tools.dashboard import portfolio_summary
+    from trade_tools.ledger import load_transactions
+
+    settings, _, prices = _load(settings_path)
     with get_session() as session:
-        prices, metadata = load_research_prices(session, base_currency="EUR")
-        actual = derive_portfolio(session, prices, as_of=date_value, metadata=metadata)
-        returns = aligned_daily_returns(pd.DataFrame({
-            ticker: frame["close"] for ticker, frame in prices.items() if "close" in frame
-        }))
-    weights = _actual_risk_positions(actual, metadata)
-    if not weights.empty and actual["portfolio_value_eur"] > 0:
-        weights["cash_weight"] = actual["cash_eur"] / actual["portfolio_value_eur"]
-    assessment = validate_target_weights(
-        weights, _risk_limits(portfolio_config), asset_returns=returns,
-        stress_scenarios=portfolio_config.stress_scenarios,
-    )
-    click.echo(
-        f"ACTUAL portfolio value EUR {actual['portfolio_value_eur']:.2f} | "
-        f"cash EUR {actual['cash_eur']:.2f} | realized P&L EUR {actual['realized_pnl_eur']:.2f} | "
-        f"unrealized P&L EUR {actual['unrealized_pnl_eur']:.2f}"
-    )
-    click.echo(actual["holdings"].to_string(index=False, na_rep=""))
-    click.echo(json.dumps(_json_safe(assessment), indent=2, allow_nan=False))
+        transactions = load_transactions(session)
+    summary = portfolio_summary(transactions, prices, settings.benchmark)
+    for key, value in summary.stats.items():
+        click.echo(f"{key:>18}: {value:,.4f}")
+    columns = ["units", "avg_cost_eur", "price_eur", "value_eur", "weight", "unrealised_pnl_eur", "unrealised_return"]
+    click.echo(summary.holdings[columns].to_string(float_format=lambda v: f"{v:,.2f}"))
+    for warning in summary.warnings:
+        click.echo(f"Warning: {warning}")
 
 
-@main.group("operations")
-def operations_group():
-    """Persist monthly decisions and produce monitoring reports."""
+@main.command("dashboard")
+@click.option("--output", default="reports/dashboard/index.html", show_default=True,
+              type=click.Path(dir_okay=False, path_type=Path))
+@settings_option
+def dashboard(output: Path, settings_path: str):
+    """Write the portfolio dashboard as a static HTML file."""
+    from trade_tools.dashboard import build_dashboard
+
+    build_dashboard(output, settings_path=settings_path)
+    click.echo(f"Dashboard written to {output}")
 
 
-@operations_group.command("monthly-decision")
-@click.option("--date", "decision_date", help="Decision date (YYYY-MM-DD), defaults to last completed month.")
-@click.option("--new-contribution", type=click.FloatRange(min=0), default=0.0, show_default=True)
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--reports-dir", default="reports/monthly_decisions", show_default=True, type=click.Path(file_okay=False))
-@click.option("--regenerate", is_flag=True, help="Supersede the prior decision and create a new generation.")
-@click.option("--refresh-history/--no-refresh-history", default=True, help="Refresh adjusted prices before computing.")
-@click.option(
-    "--auto-record/--no-auto-record", default=True,
-    help="Record the contribution and proposed trades in the ledger as assumed fills.",
-)
-def monthly_decision(
-    decision_date: str | None,
-    new_contribution: float,
-    config_path: str,
-    reports_dir: str,
-    regenerate: bool,
-    refresh_history: bool,
-    auto_record: bool,
-):
-    """Compute, risk-check and persist a monthly decision; fills are modelled, not broker orders."""
-    init_db()
-    backtest, strategy_config, portfolio_config = load_research_config(config_path)
-    if strategy_config.universe_mode != backtest.universe_mode:
-        strategy_config = replace(strategy_config, universe_mode=backtest.universe_mode)
-    if decision_date is None:
-        month_end = pd.Timestamp.now(tz="UTC").to_period("M").start_time.tz_localize("UTC") - pd.Timedelta(days=1)
-        decision_date = month_end.date().isoformat()
-    strategy = AdaptiveMomentumStrategy(strategy_config)
-    parameters = {
-        "backtest": backtest.__dict__,
-        "strategy": strategy_config.__dict__,
-        "portfolio": portfolio_config.__dict__,
-        "new_contribution_eur": new_contribution,
-    }
-    parameter_json = json.dumps(parameters, sort_keys=True, default=list)
-    parameter_hash = hashlib.sha256(parameter_json.encode()).hexdigest()
-    try:
-        requested_day = pd.Timestamp(decision_date).date()
-    except (TypeError, ValueError) as exc:
-        raise click.ClickException("Decision date must be YYYY-MM-DD.") from exc
-    month_start = requested_day.replace(day=1)
-    if not regenerate:
-        with get_session() as session:
-            existing = session.scalar(select(StrategyDecision).where(
-                StrategyDecision.strategy_name == strategy.name,
-                StrategyDecision.strategy_version == strategy.version,
-                StrategyDecision.parameter_hash == parameter_hash,
-                StrategyDecision.decision_date >= month_start,
-                StrategyDecision.decision_date <= requested_day,
-                StrategyDecision.universe_mode == strategy_config.universe_mode,
-                StrategyDecision.status == "proposed",
-            ).order_by(StrategyDecision.generation.desc()).limit(1))
-            if existing is not None:
-                click.echo(f"Existing decision {existing.id} returned unchanged; report: {existing.report_path}")
-                return
-    if refresh_history:
-        summary = MarketDataIngestion().refresh_adjusted_history()
-        if summary.failed_assets:
-            raise click.ClickException(
-                f"Adjusted-history refresh failed for {summary.failed_assets} asset(s); no decision was created."
-            )
-    try:
-        state = _read_research_state(config_path, decision_date)
-    except (ValueError, OSError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    decision, ranked, observations, metadata, backtest, strategy_config, portfolio_config, prices = state
-    if strategy_config.universe_mode != "tradable":
-        raise click.ClickException("Monthly operating decisions require universe_mode='tradable'.")
-    if _has_stale_tradable_fund(ranked):
-        raise click.ClickException("Required tradable-universe data is stale; refresh before creating a decision.")
-
-    decision_day = decision.date()
-    historical_prices = {
-        ticker: series.loc[series.index <= decision]
-        for ticker, series in observations.items()
-    }
-    price_frame = pd.DataFrame(historical_prices)
-    returns = aligned_daily_returns(price_frame)
-    covariance = sample_covariance(
-        price_frame.tail(portfolio_config.covariance_window + 1),
-        window=portfolio_config.covariance_window,
-    )
-    reports_root = Path(reports_dir)
-    reports_root.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with get_session() as session:
-            existing = list(session.scalars(select(StrategyDecision).where(
-                StrategyDecision.strategy_name == strategy.name,
-                StrategyDecision.strategy_version == strategy.version,
-                StrategyDecision.parameter_hash == parameter_hash,
-                StrategyDecision.decision_date == decision_day,
-                StrategyDecision.universe_mode == strategy_config.universe_mode,
-            ).order_by(StrategyDecision.generation)))
-            current = next((item for item in reversed(existing) if item.status == "proposed"), None)
-            if current is not None and not regenerate:
-                click.echo(f"Existing decision {current.id} returned unchanged; report: {current.report_path}")
-                return
-
-            actual = derive_portfolio(session, prices, as_of=decision_day, metadata=metadata)
-            capital = actual["portfolio_value_eur"] + new_contribution
-            if not np.isfinite(capital) or capital <= 0:
-                raise ValueError(
-                    "Actual holdings must be fully valued and portfolio value plus contribution must be positive."
-                )
-            targets = construct_target_weights(ranked.loc[ranked["selected"]], portfolio_config, covariance)
-            targets = target_values(targets, capital)
-            proposed_risk = validate_target_weights(
-                targets, _risk_limits(portfolio_config),
-                asset_returns=returns, asset_prices=price_frame,
-                stress_scenarios=portfolio_config.stress_scenarios,
-            )
-            actual_risk = validate_target_weights(
-                _actual_risk_positions(actual, metadata),
-                _risk_limits(portfolio_config),
-                asset_returns=returns,
-                stress_scenarios=portfolio_config.stress_scenarios,
-            )
-            trade_plan = propose_trades(
-                targets, actual["holdings"], capital_eur=capital,
-                cash_eur=actual["cash_eur"] + new_contribution,
-                config=TradeProposalConfig(
-                    proportional_cost_bps=backtest.proportional_cost_bps,
-                    fixed_fee=backtest.fixed_fee,
-                    minimum_trade_size=backtest.minimum_trade_size,
-                    fractional_trading=portfolio_config.fractional_trading,
-                ),
-                market_prices={
-                    ticker: float(frame.loc[frame.index <= decision, "close"].dropna().iloc[-1])
-                    for ticker, frame in prices.items()
-                    if "close" in frame and not frame.loc[frame.index <= decision, "close"].dropna().empty
-                },
-            ) if proposed_risk["status"] == "valid" else {
-                "trades": pd.DataFrame(),
-                "estimated_costs_eur": 0.0,
-                "cash_after_trades_eur": actual["cash_eur"] + new_contribution,
-            }
-            generation = max((row.generation for row in existing), default=0) + 1
-            for old in existing:
-                if old.status == "proposed":
-                    old.status = "superseded"
-            report_dir = reports_root / f"{decision_day.isoformat()}-{parameter_hash[:16]}-g{generation}"
-            report_dir.mkdir(parents=True, exist_ok=True)
-            report_path = report_dir / "report.html"
-            decision_row = StrategyDecision(
-                strategy_name=strategy.name,
-                strategy_version=strategy.version,
-                parameter_hash=parameter_hash,
-                decision_date=decision_day,
-                universe_mode=strategy_config.universe_mode,
-                generation=generation,
-                data_cutoff_at=decision.to_pydatetime(),
-                parameters=_json_safe(parameters),
-                status="proposed",
-                report_path=str(report_path),
-            )
-            session.add(decision_row)
-            session.flush()
-            target_map = dict(zip(targets["ticker"], targets["weight"])) if not targets.empty else {}
-            target_values_by_ticker = (
-                targets.set_index("ticker")["target_value"].to_dict()
-                if not targets.empty and "target_value" in targets
-                else {}
-            )
-            def optional_float(value: Any) -> float | None:
-                return float(value) if pd.notna(value) and np.isfinite(value) else None
-
-            for row in ranked.to_dict("records"):
-                feature_values = _json_safe(row)
-                if row["ticker"] in target_values_by_ticker:
-                    feature_values["target_value_eur"] = float(
-                        target_values_by_ticker[row["ticker"]]
-                    )
-                session.add(DecisionItem(
-                    decision_id=decision_row.id,
-                    asset_id=row.get("id"),
-                    ticker=row["ticker"],
-                    score=float(row["score"]) if pd.notna(row.get("score")) else None,
-                    rank=int(row["rank"]) if pd.notna(row.get("rank")) else None,
-                    selected=bool(row["selected"]),
-                    target_weight=float(target_map.get(row["ticker"], 0.0)),
-                    feature_values=feature_values,
-                    exclusion_reason=(
-                        str(row["exclusion_reason"])
-                        if pd.notna(row.get("exclusion_reason"))
-                        else None
-                    ),
-                ))
-            for trade in trade_plan["trades"].to_dict("records"):
-                session.add(DecisionTrade(
-                    decision_id=decision_row.id,
-                    ticker=trade["ticker"],
-                    side=trade["side"],
-                    quantity=optional_float(trade["quantity"]),
-                    price_eur=optional_float(trade["price_eur"]),
-                    notional_eur=optional_float(trade["notional_eur"]),
-                    estimated_cost_eur=optional_float(trade["estimated_cost_eur"]),
-                    reason=trade["reason"],
-                ))
-            combined_risk = {
-                "recommended": proposed_risk,
-                "actual": actual_risk,
-            }
-            session.add(RiskAssessment(
-                decision_id=decision_row.id,
-                status=proposed_risk["status"],
-                metrics=_json_safe(combined_risk),
-                limits=_json_safe(proposed_risk["limits"]),
-                violations=proposed_risk["violations"],
-                warnings=proposed_risk["warnings"],
-            ))
-            recorded_count = 0
-            if auto_record and proposed_risk["status"] == "valid":
-                for old in existing:
-                    if old.status == "superseded":
-                        reverse_decision_transactions(session, old.id)
-                recorded = record_decision_transactions(
-                    session,
-                    decision_id=decision_row.id,
-                    trade_date=decision_day,
-                    trades=trade_plan["trades"],
-                    asset_ids={ticker: meta["id"] for ticker, meta in metadata.items()},
-                    contribution_eur=new_contribution,
-                )
-                session.flush()
-                # Replaying the ledger rejects oversells or cash shortfalls and rolls everything back.
-                derive_portfolio(session, prices, as_of=decision_day, metadata=metadata)
-                recorded_count = len(recorded)
-            rankings_html = ranked.to_html(index=False, escape=True, na_rep="")
-            holdings_html = actual["holdings"].to_html(index=False, escape=True, na_rep="")
-            targets_html = targets.to_html(index=False, escape=True, na_rep="")
-            trades_html = trade_plan["trades"].to_html(index=False, escape=True, na_rep="")
-            report_path.write_text(f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Monthly decision {decision_day}</title>
-<style>body{{font:15px system-ui;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#18202a}}
-table{{border-collapse:collapse;font-size:13px}}th,td{{border:1px solid #ccd2d8;padding:.35rem}}
-th{{background:#eef2f6}}.actual{{color:#125d3a}}.recommended{{color:#124d83}}</style></head>
-<body><h1>Monthly operating proposal — {decision_day}</h1>
-<p>Decision #{decision_row.id}, generation {generation}; data cutoff {decision.isoformat()}.
-No orders are sent; {recorded_count} assumed-fill ledger entries were recorded. Next scheduled decision: {(decision + pd.offsets.MonthEnd(1)).date()}.</p>
-<p>Actual portfolio value: EUR {actual['portfolio_value_eur']:.2f};
-actual cash: EUR {actual['cash_eur']:.2f}; new contribution considered: EUR {new_contribution:.2f};
-recommended capital: EUR {capital:.2f}.</p>
-<h2 class="actual">Actual holdings</h2>{holdings_html}
-<h2 class="recommended">Recommended targets</h2>{targets_html}
-<h2 class="recommended">Proposed trades — assumed fills at proposal price{' (recorded in ledger)' if recorded_count else ' (not recorded)'}</h2>{trades_html}
-<p>Estimated costs: EUR {trade_plan['estimated_costs_eur']:.2f};
-projected cash after proposals: EUR {trade_plan['cash_after_trades_eur']:.2f}.
-Recommended risk status: {html.escape(proposed_risk['status'])}; actual risk status: {html.escape(actual_risk['status'])}.</p>
-<h2>Risk validation</h2><pre>{html.escape(json.dumps(_json_safe(combined_risk), indent=2))}</pre>
-<h2>Persisted feature values, rankings, and exclusions</h2>{rankings_html}</body></html>""")
-            targets.to_csv(report_dir / "recommended_targets.csv", index=False)
-            trade_plan["trades"].to_csv(report_dir / "proposed_trades.csv", index=False)
-            decision_id = decision_row.id
-            risk_status = proposed_risk["status"]
-            ledger_entries = recorded_count
-    except (ValueError, IntegrityError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(f"Persisted decision {decision_id}; report: {report_path}")
-    click.echo(
-        f"Risk status: {risk_status}; {ledger_entries} assumed-fill ledger entries recorded "
-        "(modelled fills, not broker orders)."
-    )
-    if risk_status != "valid":
-        raise click.ClickException("Recommended proposal rejected by configured risk validation.")
-
-
-def generate_monitoring_dashboard(config_path: str, output: Path) -> Path:
-    """Render the transaction-backed holdings and performance dashboard."""
-    init_db()
-    load_research_config(config_path)
-    with get_session() as session:
-        prices, metadata = load_research_prices(session, base_currency="EUR")
-        actual = derive_portfolio(session, prices, metadata=metadata)
-        holdings = actual["holdings"].copy()
-        effective_transactions = actual["transactions"]
-
-    # A holding must both have effective ledger activity and remain owned today.
-    transacted_ids = {
-        entry.asset_id for entry in effective_transactions if entry.asset_id is not None
-    }
-    if not holdings.empty:
-        holdings = holdings.loc[holdings["asset_id"].isin(transacted_ids)].copy()
-        holdings = holdings.sort_values("market_value_eur", ascending=False, na_position="last")
-
-    rows = []
-    performance_series: dict[str, pd.Series] = {}
-    for holding in holdings.itertuples(index=False):
-        ticker = str(holding.ticker)
-        frame = prices.get(ticker)
-        close = (
-            pd.to_numeric(frame["close"], errors="coerce").dropna().sort_index()
-            if frame is not None and "close" in frame else pd.Series(dtype=float)
-        )
-        asset_trades = [
-            entry for entry in effective_transactions
-            if entry.asset_id == holding.asset_id and entry.transaction_type in {"buy", "sell"}
-        ]
-        first_trade = min((entry.trade_date for entry in asset_trades), default=None)
-        since_first = close.loc[close.index >= pd.Timestamp(first_trade, tz="UTC")] if first_trade else close
-        if not since_first.empty and since_first.iloc[0] > 0:
-            performance_series[ticker] = (since_first / since_first.iloc[0] - 1) * 100
-        previous_close = close.iloc[-2] if len(close) > 1 else np.nan
-        daily_change = (
-            close.iloc[-1] / previous_close - 1
-            if len(close) > 1 and np.isfinite(previous_close) and previous_close > 0
-            else np.nan
-        )
-        basis = float(holding.average_cost_eur * holding.quantity)
-        rows.append({
-            "ticker": ticker,
-            "name": metadata.get(ticker, {}).get("name") or ticker,
-            "quantity": holding.quantity,
-            "invested_eur": basis,
-            "value_eur": holding.market_value_eur,
-            "daily_return": daily_change,
-            "pnl_eur": holding.unrealized_pnl_eur,
-            "return_pct": holding.unrealized_return,
-        })
-
-    total_invested = sum(row["invested_eur"] for row in rows if np.isfinite(row["invested_eur"]))
-    fully_priced = all(np.isfinite(row["value_eur"]) for row in rows)
-    total_value = sum(row["value_eur"] for row in rows) if fully_priced else np.nan
-    total_pnl = total_value - total_invested if fully_priced else np.nan
-    total_return = total_pnl / total_invested if fully_priced and total_invested > 0 else np.nan
-
-    def money(value: float) -> str:
-        return f"€{value:,.2f}" if np.isfinite(value) else "—"
-
-    def percent(value: float) -> str:
-        return f"{value:+.2%}" if np.isfinite(value) else "—"
-
-    def chart(series_by_name: dict[str, pd.Series]) -> str:
-        if not series_by_name:
-            return '<div class="empty">Price history will appear when daily prices are available.</div>'
-        width, height = 900, 310
-        left, right, top, bottom = 64, 24, 22, 46
-        values = np.concatenate([series.to_numpy(dtype=float) for series in series_by_name.values()])
-        low, high = float(np.nanmin(values)), float(np.nanmax(values))
-        span = max(high - low, 1.0)
-        low -= span * .08
-        high += span * .08
-        x0, x1, y0, y1 = left, width - right, top, height - bottom
-        start = min(series.index[0] for series in series_by_name.values())
-        end = max(series.index[-1] for series in series_by_name.values())
-        date_span = max((end - start).total_seconds(), 1.0)
-        pieces = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Asset price performance since first transaction">']
-        for fraction in (0, .5, 1):
-            y = y1 - fraction * (y1 - y0)
-            label = high - fraction * (high - low)
-            pieces.append(f'<line x1="{x0}" y1="{y:.1f}" x2="{x1}" y2="{y:.1f}" class="grid"/><text x="{x0-10}" y="{y+4:.1f}" text-anchor="end">{label:.0f}%</text>')
-        zero_y = y1 - (0 - low) / (high - low) * (y1 - y0)
-        pieces.append(f'<line x1="{x0}" y1="{zero_y:.1f}" x2="{x1}" y2="{zero_y:.1f}" class="zero"/>')
-        palette = ["#2563eb", "#0f9d78", "#e28b24", "#8957d5", "#dc5474", "#0891b2"]
-        labels = []
-        for index, (ticker, series) in enumerate(series_by_name.items()):
-            color = palette[index % len(palette)]
-            points = []
-            for timestamp, value in series.items():
-                x = x0 + ((timestamp - start).total_seconds() / date_span) * (x1 - x0)
-                y = y1 - (value - low) / (high - low) * (y1 - y0)
-                points.append(f"{x:.1f},{y:.1f}")
-            pieces.append(f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>')
-            labels.append(f'<span><i style="background:{color}"></i>{html.escape(ticker)}</span>')
-        pieces.append(f'<text x="{x0}" y="{height-14}">{html.escape(str(start.date()))}</text><text x="{x1}" y="{height-14}" text-anchor="end">{html.escape(str(end.date()))}</text></svg>')
-        return ''.join(pieces) + '<div class="legend">' + ''.join(labels) + '</div>'
-
-    if rows:
-        table_rows = []
-        for row in rows:
-            direction = "positive" if row["return_pct"] > 0 else "negative" if row["return_pct"] < 0 else "neutral"
-            table_rows.append(
-                '<tr>'
-                f'<td><strong>{html.escape(row["ticker"])}</strong><small>{html.escape(row["name"])}</small></td>'
-                f'<td>{row["quantity"]:,.6g}</td><td>{money(row["invested_eur"])}</td>'
-                f'<td>{money(row["value_eur"])}</td><td class="{direction}">{percent(row["daily_return"])}</td>'
-                f'<td>{money(row["pnl_eur"])}</td><td class="{direction}">{percent(row["return_pct"])}</td></tr>'
-            )
-        table = ('<div class="table-wrap"><table><thead><tr><th>Asset</th><th>Units</th>'
-                 '<th>Invested</th><th>Current value</th><th>Daily change</th>'
-                 '<th>Unrealized P&amp;L</th><th>Return</th></tr></thead><tbody>'
-                 + ''.join(table_rows) + '</tbody></table></div>')
-    else:
-        table = '<div class="empty">No current holdings with effective buy or sell transactions were found.</div>'
-
-    generated = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Portfolio performance</title>
-<style>
-:root{{--ink:#172033;--muted:#718096;--line:#e5eaf1;--paper:#fff;--canvas:#f4f7fb;--blue:#2563eb}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}}
-.shell{{max-width:1240px;margin:auto;padding:42px 28px 64px}}header{{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:26px}}
-.eyebrow{{color:var(--blue);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}}h1{{font-size:30px;letter-spacing:-.04em;margin:5px 0 0}}header p,.muted{{color:var(--muted);margin:5px 0 0}}.stamp{{font-size:12px;color:var(--muted)}}
-.cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}}.card,.panel{{background:var(--paper);border:1px solid var(--line);border-radius:13px;box-shadow:0 2px 8px #18284808}}
-.card{{padding:19px 21px}}.label{{color:var(--muted);font-size:12px;font-weight:600}}.metric{{font-size:25px;letter-spacing:-.035em;font-weight:700;margin-top:5px}}.metric-sub{{font-size:12px;color:var(--muted);margin-top:2px}}
-.panel{{padding:23px 24px;margin-top:15px}}.panel-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:15px}}h2{{font-size:16px;margin:0;letter-spacing:-.02em}}.panel-head p{{margin:4px 0 0;color:var(--muted);font-size:12px}}
-svg{{width:100%;height:auto;display:block;overflow:visible}}svg text{{fill:#8994a5;font-size:11px}}.grid{{stroke:#e9edf3;stroke-width:1}}.zero{{stroke:#9aa6b7;stroke-width:1;stroke-dasharray:4 5}}.legend{{display:flex;flex-wrap:wrap;gap:15px;margin-top:12px;color:#4b5565;font-size:12px}}.legend span{{display:flex;align-items:center;gap:6px}}.legend i{{width:9px;height:9px;border-radius:50%;display:inline-block}}
-.table-wrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;white-space:nowrap}}th{{text-align:right;color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;padding:11px 12px;border-bottom:1px solid var(--line)}}td{{text-align:right;padding:13px 12px;border-bottom:1px solid #edf0f5;font-variant-numeric:tabular-nums}}th:first-child,td:first-child{{text-align:left}}tbody tr:last-child td{{border-bottom:0}}td small{{display:block;color:var(--muted);font-size:11px;margin-top:2px}}.positive{{color:#07805b;font-weight:650}}.negative{{color:#c34455;font-weight:650}}.neutral{{color:#596579}}.empty{{padding:30px;color:var(--muted);text-align:center;background:#f9fafc;border:1px dashed #d9e0ea;border-radius:9px}}
-footer{{text-align:center;color:var(--muted);font-size:11px;margin-top:18px}}@media(max-width:720px){{.shell{{padding:26px 15px 40px}}header{{display:block}}.stamp{{margin-top:12px}}.cards{{grid-template-columns:1fr}}.panel{{padding:18px 15px}}.metric{{font-size:22px}}}}
-</style></head><body><main class="shell"><header><div><div class="eyebrow">Portfolio overview</div><h1>Performance</h1><p>Daily view of assets currently held in your transaction ledger.</p></div><div class="stamp">Updated {generated}</div></header>
-<section class="cards"><article class="card"><div class="label">Invested amount</div><div class="metric">{money(total_invested)}</div><div class="metric-sub">Remaining cost basis of current holdings</div></article>
-<article class="card"><div class="label">Current value</div><div class="metric">{money(total_value)}</div><div class="metric-sub">Latest available daily closing prices</div></article>
-<article class="card"><div class="label">Performance</div><div class="metric {'positive' if total_return > 0 else 'negative' if total_return < 0 else 'neutral'}">{percent(total_return)}</div><div class="metric-sub">{money(total_pnl)} unrealized gain / loss</div></article></section>
-<section class="panel"><div class="panel-head"><div><h2>Asset price performance</h2><p>Daily close, indexed to 0% on each asset’s first recorded transaction date.</p></div></div>{chart(performance_series)}</section>
-<section class="panel"><div class="panel-head"><div><h2>Current holdings</h2><p>Invested amount and unrealized performance for each asset you currently own.</p></div><div class="stamp">{len(rows)} assets</div></div>{table}</section>
-<footer>Daily change compares the latest close with the prior available close. Return is unrealized P&amp;L divided by remaining average cost basis. All values in EUR.</footer>
-</main></body></html>""", encoding="utf-8")
-    return output
-
-
-@operations_group.command("monitor-refresh")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--output", default="reports/monitoring/index.html", show_default=True, type=click.Path(dir_okay=False, path_type=Path))
-def monitor_refresh(config_path: str, output: Path):
-    """Generate a local static HTML dashboard from decisions, ledger, and backtests."""
-    generate_monitoring_dashboard(config_path, output)
-    click.echo(f"Monitoring report written: {output}")
-
-
-@operations_group.command("show-decision")
-@click.argument("decision_id", type=int)
-def show_decision(decision_id: int):
-    """Re-display the stored decision snapshot without re-reading market prices."""
-    init_db()
-    with get_session() as session:
-        decision = session.get(StrategyDecision, decision_id)
-        if decision is None:
-            raise click.ClickException(f"Decision {decision_id} was not found.")
-        items = list(session.scalars(select(DecisionItem).where(
-            DecisionItem.decision_id == decision_id
-        ).order_by(DecisionItem.rank)))
-        assessment = session.scalar(select(RiskAssessment).where(
-            RiskAssessment.decision_id == decision_id
-        ))
-        snapshot = {
-            "decision_id": decision.id,
-            "strategy": decision.strategy_name,
-            "version": decision.strategy_version,
-            "parameter_hash": decision.parameter_hash,
-            "decision_date": decision.decision_date.isoformat(),
-            "data_cutoff_at": decision.data_cutoff_at.isoformat(),
-            "universe_mode": decision.universe_mode,
-            "generation": decision.generation,
-            "status": decision.status,
-            "parameters": decision.parameters,
-            "items": [{
-                "ticker": item.ticker,
-                "score": item.score,
-                "rank": item.rank,
-                "selected": item.selected,
-                "target_weight": item.target_weight,
-                "feature_values": item.feature_values,
-                "exclusion_reason": item.exclusion_reason,
-            } for item in items],
-            "risk": assessment.metrics if assessment else None,
-        }
-    click.echo(json.dumps(_json_safe(snapshot), indent=2, allow_nan=False))
-
-
-@main.group("backtest")
-def backtest_group():
-    """Run and compare monthly historical simulations."""
-
-
-@backtest_group.command("run")
-@click.option("--config", "config_path", default="config/research.json", show_default=True, type=click.Path(exists=True))
-@click.option("--start", help="First decision date (YYYY-MM-DD).")
-@click.option("--end", help="Last decision date (YYYY-MM-DD).")
-@click.option("--universe-mode", type=click.Choice(["tradable", "research"]))
-@click.option("--include-holdout/--exclude-holdout", default=None, help="Include the reserved recent holdout in reports.")
-@click.option("--ablation-off", is_flag=True, help="Disable all optional strategy and weighting components.")
-def backtest_run(
-    config_path: str,
-    start: str | None,
-    end: str | None,
-    universe_mode: str | None,
-    include_holdout: bool | None,
-    ablation_off: bool,
-):
-    """Run the configured monthly backtest and write a reproducible report directory."""
-    try:
-        backtest_config, strategy_config, portfolio_config = load_research_config(config_path)
-        changes: dict[str, object] = {}
-        if start is not None:
-            changes["start"] = start
-        if end is not None:
-            changes["end"] = end
-        if universe_mode is not None:
-            changes["universe_mode"] = universe_mode
-        if include_holdout is not None:
-            changes["include_holdout"] = include_holdout
-        backtest_config = replace(backtest_config, **changes)
-        strategy_config = replace(strategy_config, universe_mode=backtest_config.universe_mode)
-        if ablation_off:
-            strategy_config = replace(
-                strategy_config,
-                volatility_adjusted=False,
-                absolute_momentum_filter=False,
-                trend_filter=False,
-            )
-            portfolio_config = replace(
-                portfolio_config,
-                inverse_volatility=False,
-                volatility_targeting=False,
-            )
-        with get_session() as session:
-            prices, metadata = load_research_prices(
-                session,
-                base_currency=backtest_config.base_currency,
-            )
-        result = run_backtest(
-            prices,
-            metadata,
-            strategy_config=strategy_config,
-            portfolio_config=portfolio_config,
-            config=backtest_config,
-        )
-        report_dir = write_backtest_report(result)
-    except (ValueError, OSError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(f"Backtest report: {report_dir}")
-    click.echo(json.dumps(_json_safe(result["metrics"]), indent=2, allow_nan=False))
-
-
-@backtest_group.command("compare")
-@click.argument("run_ids", nargs=-1, required=True)
-def backtest_compare(run_ids: tuple[str, ...]):
-    """Compare summary metrics from one or more completed run directories."""
-    summaries = []
-    for run_id in run_ids:
-        if Path(run_id).name != run_id or run_id in {".", ".."}:
-            raise click.ClickException(f"Invalid run ID: {run_id}")
-        summary_path = Path("reports/backtests") / run_id / "summary.json"
-        try:
-            summary = json.loads(summary_path.read_text())
-        except FileNotFoundError as exc:
-            raise click.ClickException(f"Backtest run not found: {run_id}") from exc
-        summaries.append({"run_id": run_id, **summary["metrics"]})
-    click.echo(pd.DataFrame(summaries).to_string(index=False))
-
+# --- data maintenance ----------------------------------------------------------------
 
 @main.command("refresh-adjusted-history")
 def refresh_adjusted_history():
@@ -1176,28 +370,6 @@ def refresh_adjusted_history():
     )
     if summary.failed_assets:
         raise click.ClickException(f"{summary.failed_assets} asset(s) failed; see logs for details.")
-
-
-def _json_safe(value):
-    if isinstance(value, dict):
-        safe = {}
-        for key, item in value.items():
-            safe_key = _json_safe(key)
-            safe[safe_key if isinstance(safe_key, (str, int, float, bool)) else str(safe_key)] = _json_safe(item)
-        return safe
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if isinstance(value, np.str_):
-        return str(value)
-    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
-        return None
-    if isinstance(value, (pd.Timestamp, datetime)):
-        return value.isoformat()
-    if isinstance(value, np.integer):
-        return int(value)
-    return value
 
 
 if __name__ == "__main__":

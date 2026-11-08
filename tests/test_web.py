@@ -26,16 +26,14 @@ def test_dashboard_requires_auth_but_health_is_public():
 
 
 def test_authenticated_dashboard_refreshes_and_disables_caching(monkeypatch):
-    def render(config_path: str, output: Path) -> Path:
-        assert config_path == "config/research.json"
-        output.write_text(
+    def render(settings_path: Path) -> str:
+        assert settings_path == Path("config/strategy.toml")
+        return (
             "<!doctype html><html><head><title>Test</title></head>"
-            "<body><h1>Live portfolio dashboard</h1></body></html>",
-            encoding="utf-8",
+            "<body><h1>Live portfolio dashboard</h1></body></html>"
         )
-        return output
 
-    monkeypatch.setattr(web, "generate_monitoring_dashboard", render)
+    monkeypatch.setattr(web, "build_dashboard", render)
     app = web.create_app(username="investor", password="correct-horse-battery")
 
     response = app.test_client().get(
@@ -52,10 +50,10 @@ def test_authenticated_dashboard_refreshes_and_disables_caching(monkeypatch):
 
 
 def test_dashboard_failure_returns_generic_unavailable_response(monkeypatch):
-    def fail_render(config_path: str, output: Path) -> Path:
+    def fail_render(settings_path: Path) -> str:
         raise RuntimeError("private database connection detail")
 
-    monkeypatch.setattr(web, "generate_monitoring_dashboard", fail_render)
+    monkeypatch.setattr(web, "build_dashboard", fail_render)
     app = web.create_app(username="investor", password="correct-horse-battery")
 
     response = app.test_client().get(
